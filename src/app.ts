@@ -6,8 +6,9 @@ import { uuid } from "./uuid.js";
 import "./views/chat-view.js";
 import "./views/overview-view.js";
 import "./views/logs-view.js";
+import "./mission-control.js";
 
-type Tab = "chat" | "overview" | "logs";
+type Tab = "chat" | "overview" | "logs" | "missionControl";
 
 interface ChatMessage {
   id: string;
@@ -415,6 +416,11 @@ export class OpenClawApp extends LitElement {
               <span class="nav__item-icon">📜</span>
               <span class="nav__item-label">Logs</span>
             </button>
+            <button class="nav__item ${this.tab === "missionControl" ? "nav__item--active" : ""}"
+              @click=${() => this.setTab("missionControl")}>
+              <span class="nav__item-icon">🛰️</span>
+              <span class="nav__item-label">Mission Control</span>
+            </button>
           </div>
 
           <div class="nav__footer">
@@ -492,6 +498,10 @@ export class OpenClawApp extends LitElement {
       case "logs":
         return html`
           <logs-view .client=${this.client}></logs-view>
+        `;
+      case "missionControl":
+        return html`
+          <mission-control-view></mission-control-view>
         `;
       default:
         return nothing;
