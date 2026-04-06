@@ -4,6 +4,7 @@ import { customElement, property, state } from "lit/decorators.js";
 interface MissionControlEvent {
   id?: number | string;
   runId?: string;
+  sessionId?: string;
   sessionKey?: string;
   eventType?: string;
   action?: string;
@@ -33,6 +34,7 @@ interface MissionControlDocument {
 interface MissionControlTask {
   id?: number | string;
   runId?: string;
+  sessionId?: string;
   sessionKey?: string;
   agentId?: string;
   status?: string;
@@ -96,12 +98,15 @@ export class MissionControlView extends LitElement {
   @state() private keyword = "";
   @state() private statusFilter = "all";
   @state() private sourceFilter = "";
+  @state() private sessionIdFilter = "";
   @state() private sessionKeyFilter = "";
   @state() private timeFrom = "";
   @state() private timeTo = "";
   @state() private dateFromTime = "";
   @state() private dateToTime = "";
   @state() private outcomeFilter: "all" | "success" | "failed" = "all";
+  @state() private selectedSessionId = "";
+  @state() private sessionPickerSearch = "";
 
   private readonly apiPath = "/api/mission-control/logs";
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -172,6 +177,7 @@ export class MissionControlView extends LitElement {
     if (this.keyword.trim()) url.searchParams.set("q", this.keyword.trim());
     if (this.statusFilter !== "all") url.searchParams.set("status", this.statusFilter);
     if (this.sourceFilter.trim()) url.searchParams.set("source", this.sourceFilter.trim());
+    if (this.sessionIdFilter.trim()) url.searchParams.set("sessionId", this.sessionIdFilter.trim());
     if (this.sessionKeyFilter.trim()) url.searchParams.set("sessionKey", this.sessionKeyFilter.trim());
     if (this.outcomeFilter !== "all") url.searchParams.set("outcome", this.outcomeFilter);
 
@@ -220,6 +226,7 @@ export class MissionControlView extends LitElement {
     this.dbPath = payload.dbPath || "-";
     this.generatedAt = payload.generatedAt || "";
     this.tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+    this.syncSelectedSession();
 
     const pagination = payload.pagination;
     this.pagination = {
@@ -263,6 +270,7 @@ export class MissionControlView extends LitElement {
     this.keyword = "";
     this.statusFilter = "all";
     this.sourceFilter = "";
+    this.sessionIdFilter = "";
     this.sessionKeyFilter = "";
     this.timeFrom = "";
     this.timeTo = "";
@@ -283,6 +291,7 @@ export class MissionControlView extends LitElement {
       this.keyword = "";
       this.statusFilter = "all";
       this.sourceFilter = "";
+      this.sessionIdFilter = "";
       this.sessionKeyFilter = "";
       this.timeFrom = today;
       this.timeTo = today;
@@ -298,6 +307,7 @@ export class MissionControlView extends LitElement {
       this.keyword = "";
       this.statusFilter = "all";
       this.sourceFilter = "";
+      this.sessionIdFilter = "";
       this.sessionKeyFilter = "";
       this.timeFrom = from.toISOString().slice(0, 10);
       this.timeTo = now.toISOString().slice(0, 10);
@@ -310,6 +320,7 @@ export class MissionControlView extends LitElement {
       this.keyword = "";
       this.statusFilter = "all";
       this.sourceFilter = "";
+      this.sessionIdFilter = "";
       this.sessionKeyFilter = "";
       this.timeFrom = "";
       this.timeTo = "";
@@ -322,6 +333,7 @@ export class MissionControlView extends LitElement {
       this.keyword = "";
       this.statusFilter = "all";
       this.sourceFilter = "";
+      this.sessionIdFilter = "";
       this.sessionKeyFilter = "";
       this.timeFrom = "";
       this.timeTo = "";
@@ -334,6 +346,7 @@ export class MissionControlView extends LitElement {
       this.keyword = "";
       this.statusFilter = "running";
       this.sourceFilter = "";
+      this.sessionIdFilter = "";
       this.sessionKeyFilter = "";
       this.timeFrom = "";
       this.timeTo = "";
@@ -348,6 +361,7 @@ export class MissionControlView extends LitElement {
       this.keyword = "";
       this.statusFilter = "all";
       this.sourceFilter = "";
+      this.sessionIdFilter = "";
       this.sessionKeyFilter = "";
       this.timeFrom = "";
       this.timeTo = "";
@@ -593,6 +607,7 @@ export class MissionControlView extends LitElement {
           <summary>Task Details</summary>
           <div class="mc-nested-grid">
             ${this.renderRow("Run", task.runId || "-")}
+            ${this.renderRow("Session ID", task.sessionId || "-")}
             ${this.renderRow("Session", task.sessionKey || "-")}
             ${this.renderRow("Agent", task.agentId || "-")}
             ${this.renderRow("Source", task.source || "-")}
@@ -680,6 +695,11 @@ export class MissionControlView extends LitElement {
             <input class="field__input" type="text" .value=${this.keyword}
               placeholder="run id, prompt, response, error..."
               @input=${(event: Event) => { this.keyword = (event.target as HTMLInputElement).value; this.activePreset = "none"; }} />
+          </div>
+
+          <div class="field">
+            <label class="field__label">Session ID</label>
+            ${this.renderSessionPicker()}
           </div>
 
           <div class="field">
@@ -800,7 +820,195 @@ export class MissionControlView extends LitElement {
     `;
   }
 
+  private getTaskTimestamp(task: MissionControlTask) {
+    const raw = task.timestamp || task.createdAt || "";
+    const parsed = raw ? Date.parse(raw) : Number.NaN;
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+
+  private truncateText(value: string, maxLength = 96) {
+    if (value.length <= maxLength) return value;
+    return `${value.slice(0, maxLength)}...`;
+  }
+
+  private getTaskPreviewText(task: MissionControlTask) {
+    const fromEvent = Array.isArray(task.events)
+      ? [...task.events]
+        .reverse()
+        .find((event) => event.message || event.title || event.description)
+      : undefined;
+
+    const response = typeof task.response === "string" ? task.response.trim() : "";
+    const prompt = task.prompt?.trim() || "";
+    const title = task.title?.trim() || "";
+    const description = task.description?.trim() || "";
+    const eventText = (fromEvent?.message || fromEvent?.title || fromEvent?.description || "").trim();
+
+    const preview = title || description || prompt || response || eventText || "(no message)";
+    return this.truncateText(preview.replace(/\s+/g, " "));
+  }
+
+  private getSessionId(task: MissionControlTask) {
+    const value = task.sessionId?.trim();
+    return value || "unknown";
+  }
+
+  private getSessionGroups() {
+    const groups = new Map<string, { sessionId: string; tasks: MissionControlTask[]; latestTs: number; latestPreview: string }>();
+
+    for (const task of this.tasks) {
+      const sessionId = task.sessionId?.trim();
+      if (!sessionId) continue;
+      const current = groups.get(sessionId);
+      const ts = this.getTaskTimestamp(task);
+      const preview = this.getTaskPreviewText(task);
+
+      if (!current) {
+        groups.set(sessionId, { sessionId, tasks: [task], latestTs: ts, latestPreview: preview });
+      } else {
+        current.tasks.push(task);
+        if (ts >= current.latestTs) {
+          current.latestTs = ts;
+          current.latestPreview = preview;
+        }
+      }
+    }
+
+    return Array.from(groups.values()).sort((a, b) => b.latestTs - a.latestTs);
+  }
+
+  private getVisibleSessionGroups() {
+    const query = this.sessionPickerSearch.trim().toLowerCase();
+    const groups = this.getSessionGroups();
+    if (!query) return groups;
+
+    return groups.filter((group) => {
+      return group.sessionId.toLowerCase().includes(query) || group.latestPreview.toLowerCase().includes(query);
+    });
+  }
+
+  private renderSessionPicker() {
+    const groups = this.getVisibleSessionGroups();
+    const detailsKey = "filter:session-picker";
+    const selectedGroup = this.getSessionGroups().find((group) => group.sessionId === this.sessionIdFilter);
+    const buttonLabel = selectedGroup ? this.truncateText(selectedGroup.latestPreview, 48) : "Pick a session";
+
+    return html`
+      <div style="position: relative; display: inline-block; width: 100%; overflow: visible;">
+        <details
+          class="mc-details"
+          ?open=${this.isOpen(detailsKey)}
+          @toggle=${(event: Event) => this.toggleDetail(detailsKey, (event.currentTarget as HTMLDetailsElement).open)}
+          style="margin: 0; width: 100%;"
+        >
+          <summary style="list-style: none; cursor: pointer; display: block;">
+            <span class="btn btn--ghost btn--sm" style="width: 100%; justify-content: space-between; display: inline-flex; gap: 12px;">
+              <span>${buttonLabel}</span>
+              <span class="badge">${groups.length}</span>
+            </span>
+          </summary>
+
+          <div
+            style="position: absolute; top: calc(100% + 8px); left: 0; z-index: 25; width: min(520px, 92vw); max-width: 100%;"
+          >
+            <section class="card" style="padding: 10px 12px; box-shadow: var(--shadow-lg, 0 14px 35px rgba(0, 0, 0, 0.18));">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;">
+                <div>
+                  <div style="font-weight: 600;">Sessions</div>
+                  <div style="font-size: 12px; color: var(--text-secondary, #666);">Search by session id or preview</div>
+                </div>
+                <button
+                  class="btn btn--ghost btn--sm"
+                  @click=${() => {
+                    this.sessionIdFilter = "";
+                    this.selectedSessionId = "";
+                    this.sessionPickerSearch = "";
+                    this.activePreset = "none";
+                    this.toggleDetail(detailsKey, false);
+                  }}
+                >
+                  Clear
+                </button>
+              </div>
+
+              <input
+                class="field__input"
+                type="text"
+                .value=${this.sessionPickerSearch}
+                placeholder="Search sessions or previews..."
+                @input=${(event: Event) => { this.sessionPickerSearch = (event.target as HTMLInputElement).value; }}
+                style="margin-bottom: 10px;"
+              />
+
+              <div class="mc-nested-list" style="max-height: 260px; overflow: auto;">
+                ${groups.length
+                  ? groups.map((group) => html`
+                    <button
+                      class="btn btn--ghost btn--sm ${this.selectedSessionId === group.sessionId ? "mc-filter-preset--active" : ""}"
+                      style="width: 100%; text-align: left; justify-content: flex-start; margin-bottom: 6px; padding-top: 10px; padding-bottom: 10px;"
+                      @click=${() => {
+                        this.sessionIdFilter = group.sessionId;
+                        this.selectedSessionId = group.sessionId;
+                        this.activePreset = "none";
+                        this.sessionPickerSearch = "";
+                        this.toggleDetail(detailsKey, false);
+                      }}
+                    >
+                      <div style="display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%;">
+                        <span style="font-weight: 600; line-height: 1.2;">${group.latestPreview}</span>
+                        <span style="font-size: 12px; color: var(--text-secondary, #666);">${group.sessionId} · ${group.tasks.length} tasks</span>
+                      </div>
+                    </button>
+                  `)
+                  : html`<div class="mc-description">No sessions available yet.</div>`}
+              </div>
+            </section>
+          </div>
+        </details>
+      </div>
+    `;
+  }
+
+  private syncSelectedSession() {
+    const groups = this.getSessionGroups();
+    if (!groups.length) {
+      this.selectedSessionId = "";
+      return;
+    }
+
+    const hasCurrent = groups.some((group) => group.sessionId === this.selectedSessionId);
+    if (!this.selectedSessionId || !hasCurrent) {
+      this.selectedSessionId = groups[0].sessionId;
+    }
+  }
+
+  private renderSessionTabs() {
+    const groups = this.getSessionGroups();
+    if (!groups.length) return nothing;
+
+    return html`
+      <section class="card" style="padding: 10px 12px;">
+        <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+          <span style="font-weight: 500; color: var(--text-secondary, #666);">Sessions:</span>
+          ${groups.map((group) => html`
+            <button
+              class="btn btn--ghost btn--sm ${this.selectedSessionId === group.sessionId ? "mc-filter-preset--active" : ""}"
+              title=${`Session ID: ${group.sessionId}`}
+              @click=${() => { this.selectedSessionId = group.sessionId; }}
+            >
+              ${this.truncateText(group.latestPreview, 48)} (${group.tasks.length})
+            </button>
+          `)}
+        </div>
+      </section>
+    `;
+  }
+
   render() {
+    const sessionGroups = this.getSessionGroups();
+    const selectedGroup = sessionGroups.find((group) => group.sessionId === this.selectedSessionId);
+    const visibleTasks = selectedGroup ? selectedGroup.tasks : this.tasks;
+
     return html`
       <section class="content mission-control">
         <header class="content__header mission-control__header">
@@ -827,11 +1035,13 @@ export class MissionControlView extends LitElement {
 
         ${this.renderFilterPanel()}
 
+        ${this.renderSessionTabs()}
+
         ${this.error ? html`<div class="callout callout--danger">${this.error}</div>` : nothing}
 
         <div class="mission-control__list">
-          ${this.tasks.length
-            ? this.tasks.map((task) => this.renderTask(task))
+          ${visibleTasks.length
+            ? visibleTasks.map((task) => this.renderTask(task))
             : html`<div class="card empty-state">${this.loading ? "Loading logs..." : "No task logs yet"}</div>`}
         </div>
 
