@@ -7,8 +7,9 @@ import "./views/chat-view.js";
 import "./views/overview-view.js";
 import "./views/logs-view.js";
 import "./mission-control.js";
+import "./cron-jobs.js";
 
-type Tab = "chat" | "overview" | "logs" | "missionControl";
+type Tab = "chat" | "overview" | "logs" | "missionControl" | "cronJobs";
 
 interface ChatMessage {
   id: string;
@@ -421,6 +422,11 @@ export class OpenClawApp extends LitElement {
               <span class="nav__item-icon">🛰️</span>
               <span class="nav__item-label">Mission Control</span>
             </button>
+            <button class="nav__item ${this.tab === "cronJobs" ? "nav__item--active" : ""}"
+              @click=${() => this.setTab("cronJobs")}>
+              <span class="nav__item-icon">⏱️</span>
+              <span class="nav__item-label">Cron Jobs</span>
+            </button>
           </div>
 
           <div class="nav__footer">
@@ -502,6 +508,10 @@ export class OpenClawApp extends LitElement {
       case "missionControl":
         return html`
           <mission-control-view .gatewayUrl=${this.gatewayUrl}></mission-control-view>
+        `;
+      case "cronJobs":
+        return html`
+          <cron-jobs-view .gatewayUrl=${this.gatewayUrl}></cron-jobs-view>
         `;
       default:
         return nothing;

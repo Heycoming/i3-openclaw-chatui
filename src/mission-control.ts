@@ -44,6 +44,13 @@ interface MissionControlTask {
   response?: unknown;
   error?: unknown;
   source?: string;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cacheReadTokens?: number | null;
+  cacheWriteTokens?: number | null;
+  totalTokens?: number | null;
+  estimatedCostUsd?: number | null;
+  responseUsage?: unknown;
   timestamp?: string;
   createdAt?: string;
   events?: MissionControlEvent[];
@@ -65,6 +72,27 @@ interface LogsPayload {
   generatedAt?: string;
   tasks?: MissionControlTask[];
   pagination?: Partial<PaginationMeta>;
+}
+
+interface SubagentRunRecord {
+  runId: string;
+  entry?: unknown;
+}
+
+interface SubagentSessionRecord {
+  key?: string;
+  sessionId?: string;
+  label?: string;
+  sessionFile?: string;
+  [key: string]: unknown;
+}
+
+interface SubagentRunsPayload {
+  runs?: SubagentRunRecord[];
+}
+
+interface SubagentSessionsPayload {
+  sessions?: SubagentSessionRecord[];
 }
 
 type FilterPreset = "none" | "today" | "last7days" | "success" | "failed" | "running" | "5min" | "10min" | "30min" | "1h" | "6h" | "12h" | "24h";
@@ -107,8 +135,12 @@ export class MissionControlView extends LitElement {
   @state() private outcomeFilter: "all" | "success" | "failed" = "all";
   @state() private selectedSessionId = "";
   @state() private sessionPickerSearch = "";
+  @state() private subagentRuns: SubagentRunRecord[] = [];
+  @state() private subagentSessions: SubagentSessionRecord[] = [];
 
   private readonly apiPath = "/api/mission-control/logs";
+  private readonly subagentRunsPath = "/api/subagents/runs";
+  private readonly subagentSessionsPath = "/api/subagents/sessions";
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private openDetails = new Set<string>();
 
@@ -200,6 +232,10 @@ export class MissionControlView extends LitElement {
     return url.toString();
   }
 
+  private buildApiUrl(pathname: string) {
+    return new URL(pathname, this.resolveApiOrigin()).toString();
+  }
+
   private async refresh() {
     this.loading = true;
     this.error = "";
@@ -213,9 +249,31 @@ export class MissionControlView extends LitElement {
       }
 
       this.setPayload(payload);
+
+      const [subagentRunsResult, subagentSessionsResult] = await Promise.allSettled([
+        fetch(this.buildApiUrl(this.subagentRunsPath), { cache: "no-store" }),
+        fetch(this.buildApiUrl(this.subagentSessionsPath), { cache: "no-store" }),
+      ]);
+
+      if (subagentRunsResult.status === "fulfilled" && subagentRunsResult.value.ok) {
+        const subagentRunsPayload = (await subagentRunsResult.value.json()) as SubagentRunsPayload;
+        this.subagentRuns = Array.isArray(subagentRunsPayload.runs) ? subagentRunsPayload.runs : [];
+      } else {
+        this.subagentRuns = [];
+      }
+
+      if (subagentSessionsResult.status === "fulfilled" && subagentSessionsResult.value.ok) {
+        const subagentSessionsPayload = (await subagentSessionsResult.value.json()) as SubagentSessionsPayload;
+        this.subagentSessions = Array.isArray(subagentSessionsPayload.sessions) ? subagentSessionsPayload.sessions : [];
+      } else {
+        this.subagentSessions = [];
+      }
+
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error);
       this.tasks = [];
+      this.subagentRuns = [];
+      this.subagentSessions = [];
     } finally {
       this.loading = false;
     }
@@ -576,11 +634,112 @@ export class MissionControlView extends LitElement {
     `;
   }
 
+  private getSubagentDataForTask(task: MissionControlTask) {
+    const taskRunId = task.runId || "";
+    const taskSessionKey = task.sessionKey || "";
+    const taskSessionId = task.sessionId || "";
+
+    const runs = this.subagentRuns.filter((run) => {
+      if (run.runId === taskRunId) return true;
+      if (!this.isRecord(run.entry)) return false;
+
+      const entryRunId = typeof run.entry.runId === "string" ? run.entry.runId : "";
+      const parentRunId = typeof run.entry.parentRunId === "string" ? run.entry.parentRunId : "";
+      const sessionKey = typeof run.entry.sessionKey === "string" ? run.entry.sessionKey : "";
+      const parentSessionKey = typeof run.entry.parentSessionKey === "string" ? run.entry.parentSessionKey : "";
+      const sessionId = typeof run.entry.sessionId === "string" ? run.entry.sessionId : "";
+
+      if (entryRunId && entryRunId === taskRunId) return true;
+      if (parentRunId && parentRunId === taskRunId) return true;
+      if (sessionId && taskSessionId && sessionId === taskSessionId) return true;
+      if (sessionKey && taskSessionKey && sessionKey === taskSessionKey) return true;
+      if (parentSessionKey && taskSessionKey && parentSessionKey === taskSessionKey) return true;
+
+      return false;
+    });
+
+    const sessions = this.subagentSessions.filter((session) => {
+      const sid = typeof session.sessionId === "string" ? session.sessionId : "";
+      const key = typeof session.key === "string" ? session.key : "";
+
+      if (sid && taskSessionId && sid === taskSessionId) return true;
+      if (taskSessionKey && key.includes(taskSessionKey)) return true;
+      return false;
+    });
+
+    return { runs, sessions };
+  }
+
+  private renderSubagentSection(task: MissionControlTask, baseKey: string) {
+    const { runs, sessions } = this.getSubagentDataForTask(task);
+    const total = runs.length + sessions.length;
+    if (!total) return nothing;
+
+    return html`
+      <details
+        class="mc-details"
+        ?open=${this.isOpen(`${baseKey}:subagents`)}
+        @toggle=${(event: Event) => this.toggleDetail(`${baseKey}:subagents`, (event.currentTarget as HTMLDetailsElement).open)}
+      >
+        <summary>Subagents (${total})</summary>
+
+        ${runs.length
+          ? html`
+            <div class="mc-nested-list">
+              ${runs.map((run, index) => html`
+                <article class="mc-nested-item">
+                  <header class="mc-nested-item__header">
+                    <span class="badge">Run</span>
+                    <span class="mc-nested-item__title">${run.runId || `subagent-${index + 1}`}</span>
+                  </header>
+                  <div class="mc-nested-grid">
+                    ${this.renderRow("Run ID", run.runId || "-")}
+                    ${this.renderRow("Entry", this.renderStructuredValue(run.entry, `${baseKey}:subagent-run:${run.runId || index}`))}
+                  </div>
+                </article>
+              `)}
+            </div>
+          `
+          : nothing}
+
+        ${sessions.length
+          ? html`
+            <div class="mc-nested-list">
+              ${sessions.map((session, index) => html`
+                <article class="mc-nested-item">
+                  <header class="mc-nested-item__header">
+                    <span class="badge">Session</span>
+                    <span class="mc-nested-item__title">${session.label || session.sessionId || `subagent-session-${index + 1}`}</span>
+                  </header>
+                  <div class="mc-nested-grid">
+                    ${this.renderRow("Session ID", session.sessionId || "-")}
+                    ${this.renderRow("Key", session.key || "-")}
+                    ${this.renderRow("Data", this.renderStructuredValue(session, `${baseKey}:subagent-session:${session.sessionId || index}`))}
+                  </div>
+                </article>
+              `)}
+            </div>
+          `
+          : nothing}
+      </details>
+    `;
+  }
+
   private formatDate(value?: string) {
     if (!value) return "-";
     const d = new Date(value);
     if (Number.isNaN(d.valueOf())) return value;
     return d.toLocaleString();
+  }
+
+  private formatTokenCount(value: unknown) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+    return value.toLocaleString();
+  }
+
+  private formatUsd(value: unknown) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+    return `$${value.toFixed(6)}`;
   }
 
   private renderTask(task: MissionControlTask) {
@@ -612,7 +771,14 @@ export class MissionControlView extends LitElement {
             ${this.renderRow("Agent", task.agentId || "-")}
             ${this.renderRow("Source", task.source || "-")}
             ${this.renderRow("At", this.formatDate(task.timestamp))}
+            ${this.renderRow("Input Tokens", this.formatTokenCount(task.inputTokens))}
+            ${this.renderRow("Output Tokens", this.formatTokenCount(task.outputTokens))}
+            ${this.renderRow("Cache Read Tokens", this.formatTokenCount(task.cacheReadTokens))}
+            ${this.renderRow("Cache Write Tokens", this.formatTokenCount(task.cacheWriteTokens))}
+            ${this.renderRow("Total Tokens", this.formatTokenCount(task.totalTokens))}
+            ${this.renderRow("Estimated Cost (USD)", this.formatUsd(task.estimatedCostUsd))}
           </div>
+          ${task.responseUsage ? this.renderRow("Response Usage", this.renderStructuredValue(task.responseUsage, `${baseKey}:response-usage`)) : nothing}
           ${this.renderTextDetails(task.prompt, "Prompt", `${baseKey}:prompt`)}
           ${this.renderTextDetails(task.response, "Response", `${baseKey}:response`)}
           ${this.renderTextDetails(task.error, "Error", `${baseKey}:error`)}
@@ -647,6 +813,8 @@ export class MissionControlView extends LitElement {
             </details>
           `
           : nothing}
+
+        ${this.renderSubagentSection(task, baseKey)}
       </article>
     `;
   }
