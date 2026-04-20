@@ -138,7 +138,7 @@ export class MissionControlView extends LitElement {
   @state() private subagentRuns: SubagentRunRecord[] = [];
   @state() private subagentSessions: SubagentSessionRecord[] = [];
 
-  private readonly apiPath = "/api/mission-control/logs";
+  private readonly apiPath = "/api/mission-control/chatui";
   private readonly subagentRunsPath = "/api/subagents/runs";
   private readonly subagentSessionsPath = "/api/subagents/sessions";
   private refreshTimer: ReturnType<typeof setInterval> | null = null;

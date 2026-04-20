@@ -24,6 +24,11 @@ interface CronRunsPayload {
 interface CronActionResult {
   ok?: boolean;
   error?: string;
+  response?: {
+    ok?: boolean;
+    error?: unknown;
+    payload?: unknown;
+  };
 }
 
 @customElement("cron-jobs-view")
@@ -233,6 +238,14 @@ export class CronJobsView extends LitElement {
     return nextRunAtMs === null ? null : Math.max(0, nextRunAtMs - this.nowMs);
   }
 
+  private formatJobCountdownInline(job: CronJobRecord) {
+    const remainingMs = this.getRemainingMs(job);
+    const intervalMs = this.resolveIntervalMs(job);
+    const countdown = remainingMs === null ? "-" : this.formatCountdown(remainingMs);
+    const intervalLabel = intervalMs && intervalMs > 0 ? this.formatDurationMs(intervalMs) : "-";
+    return `${countdown} / ${intervalLabel}`;
+  }
+
   private getJobsSortedByNextRun() {
     return [...this.jobs].sort((left, right) => {
       const leftRemaining = this.getRemainingMs(left);
@@ -412,29 +425,29 @@ export class CronJobsView extends LitElement {
     const elapsedMs = intervalMs && intervalMs > 0 ? Math.max(0, Math.min(intervalMs, intervalMs - remainingMs)) : null;
     const progressNow = elapsedMs ?? 0;
     const progressMax = intervalMs && intervalMs > 0 ? intervalMs : 1;
-    const progressLabel = intervalMs && intervalMs > 0
-      ? `${this.formatDurationMs(remainingMs)}/${this.formatDurationMs(intervalMs)}`
-      : `${this.formatDurationMs(remainingMs)}/-`;
+    const intervalLabel = intervalMs && intervalMs > 0 ? this.formatDurationMs(intervalMs) : "-";
 
     return html`
       <div class="mc-row" style="grid-column: 1 / -1;">
         <div class="mc-row__key">Countdown</div>
         <div class="mc-row__value" style="width: 100%; display: flex; flex-direction: column; gap: 6px;">
           <div style="display: flex; align-items: baseline; gap: 8px;">
-            <span style="font-weight: 700; letter-spacing: 0.04em;">${this.formatCountdown(remainingMs)}</span>
-            <span style="opacity: 0.75;">(DD:HH:MM:SS)</span>
+            <span style="font-weight: 700; letter-spacing: 0.04em;">${this.formatCountdown(remainingMs)} / ${intervalLabel}</span>
           </div>
           <progress style="width: 100%; height: 10px;" .max=${progressMax} .value=${progressNow}></progress>
-          <span style="opacity: 0.8;">${progressLabel}</span>
         </div>
       </div>
     `;
   }
 
   private renderTimelineView() {
-    const timelineJobs = this.getJobsSortedByNextRun().filter((job) => this.getNextRunAtMs(job) !== null);
     const timelineWindowMs = 24 * 60 * 60 * 1000;
     const now = this.nowMs;
+    const timelineUpperBound = now + timelineWindowMs;
+    const timelineJobs = this.getJobsSortedByNextRun().filter((job) => {
+      const nextRunAtMs = this.getNextRunAtMs(job);
+      return nextRunAtMs !== null && nextRunAtMs >= now && nextRunAtMs <= timelineUpperBound;
+    });
     const markerWidth = timelineJobs.length > 12 ? 108 : timelineJobs.length > 8 ? 128 : 156;
     const markerLineHeight = timelineJobs.length > 12 ? 22 : timelineJobs.length > 8 ? 26 : 32;
     const markerFontSize = timelineJobs.length > 12 ? 11 : timelineJobs.length > 8 ? 12 : 13;
@@ -591,6 +604,26 @@ export class CronJobsView extends LitElement {
     }
   }
 
+  private extractActionError(payload: CronActionResult, status: number) {
+    const topLevel = typeof payload.error === "string" && payload.error.trim() ? payload.error.trim() : "";
+    if (topLevel) return topLevel;
+
+    const nested = payload.response?.error;
+    if (typeof nested === "string" && nested.trim()) {
+      return nested.trim();
+    }
+    if (nested && typeof nested === "object") {
+      const record = nested as Record<string, unknown>;
+      const message = typeof record.message === "string" ? record.message : "";
+      const code = typeof record.code === "string" ? record.code : "";
+      if (code && message) return `${code}: ${message}`;
+      if (message) return message;
+      if (code) return code;
+    }
+
+    return `Request failed (${status})`;
+  }
+
   private async performAction(path: string, method: "POST" | "PUT" | "PATCH" | "DELETE", body?: unknown) {
     const res = await fetch(this.buildApiUrl(path), {
       method,
@@ -598,8 +631,9 @@ export class CronJobsView extends LitElement {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const payload = (await res.json()) as CronActionResult;
-    if (!res.ok || payload.ok === false) {
-      throw new Error(payload.error || `Request failed (${res.status})`);
+    const failed = !res.ok || payload.ok === false || payload.response?.ok === false;
+    if (failed) {
+      throw new Error(this.extractActionError(payload, res.status));
     }
   }
 
@@ -680,10 +714,10 @@ export class CronJobsView extends LitElement {
     this.formMode = "update";
   }
 
-  private buildJobFromForm(jobId?: string) {
-    const id = jobId || `job-${Date.now()}`;
-    return {
-      id,
+  private buildJobFromForm(options?: { includeId?: boolean; jobId?: string }) {
+    const includeId = options?.includeId ?? true;
+    const jobId = options?.jobId;
+    const base: Record<string, unknown> = {
       name: this.formName.trim(),
       description: this.formDescription.trim(),
       agentId: this.formAgentId.trim(),
@@ -692,16 +726,20 @@ export class CronJobsView extends LitElement {
       sessionTarget: this.formSession,
       wakeMode: this.formWakeMode,
       payload: this.buildPayloadFromForm(),
-    } as Record<string, unknown>;
+    };
+    if (includeId) {
+      base.id = jobId || `job-${Date.now()}`;
+    }
+    return base;
   }
 
   private async createJob() {
     this.setActionStateStart();
     try {
       if (!this.formName.trim()) throw new Error("Job name is required");
-      const job = this.buildJobFromForm();
-      await this.performAction(this.jobsPath, "POST", { job });
-      this.setActionStateDone(`Created job: ${job.id}`);
+      const job = this.buildJobFromForm({ includeId: false });
+      await this.performAction(this.jobsPath, "POST", job);
+      this.setActionStateDone(`Created job: ${this.formName.trim()}`);
       this.formMode = null;
       this.resetForm();
       await this.refresh();
@@ -714,7 +752,7 @@ export class CronJobsView extends LitElement {
     this.setActionStateStart();
     try {
       if (!this.formName.trim()) throw new Error("Job name is required");
-      const patch = this.buildJobFromForm(jobId);
+      const patch = this.buildJobFromForm({ includeId: false, jobId });
       await this.performAction(`${this.jobsPath}/${encodeURIComponent(jobId)}`, "PUT", { patch });
       this.setActionStateDone(`Updated job: ${jobId}`);
       this.formMode = null;
@@ -1041,9 +1079,10 @@ export class CronJobsView extends LitElement {
                 const enabled = typeof job.enabled === "boolean" ? job.enabled : true;
                 return html`
                   <article class="mc-nested-item">
-                    <header class="mc-nested-item__header">
+                    <header class="mc-nested-item__header" style="display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;">
                       <span class="badge">${enabled ? "enabled" : "disabled"}</span>
-                      <span class="mc-nested-item__title">${this.getJobLabel(job)}</span>
+                      <span class="mc-nested-item__title" style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this.getJobLabel(job)}</span>
+                      <span class="badge badge--warn" style="font-variant-numeric: tabular-nums;">${this.formatJobCountdownInline(job)}</span>
                       <div style="display: flex; gap: 6px; margin-left: auto;">
                         <button
                           class="btn btn--ghost btn--xs"
@@ -1071,19 +1110,22 @@ export class CronJobsView extends LitElement {
                         </button>
                       </div>
                     </header>
-                    <div class="mc-nested-grid">
-                      <div class="mc-row"><div class="mc-row__key">ID</div><div class="mc-row__value">${id}</div></div>
-                      ${typeof job.createdAtMs === "number" ? html`<div class="mc-row"><div class="mc-row__key">Created</div><div class="mc-row__value">${this.formatMs(job.createdAtMs)}</div></div>` : nothing}
-                      ${typeof job.updatedAtMs === "number" ? html`<div class="mc-row"><div class="mc-row__key">Updated</div><div class="mc-row__value">${this.formatMs(job.updatedAtMs)}</div></div>` : nothing}
-                      ${job.description ? html`<div class="mc-row"><div class="mc-row__key">Description</div><div class="mc-row__value">${job.description}</div></div>` : nothing}
-                      <div class="mc-row"><div class="mc-row__key">Schedule</div><div class="mc-row__value">${this.formatScheduleSummary(job)}</div></div>
-                      <div class="mc-row"><div class="mc-row__key">Session Target</div><div class="mc-row__value">${this.formatSessionTarget(job)}</div></div>
-                      <div class="mc-row"><div class="mc-row__key">Wake Mode</div><div class="mc-row__value">${this.formatWakeMode(job)}</div></div>
-                      <div class="mc-row"><div class="mc-row__key">Payload</div><div class="mc-row__value">${this.formatPayloadSummary(job)}</div></div>
-                      ${this.renderNextRunCountdown(job)}
-                      ${this.renderJobState(job)}
-                      ${job.agentId ? html`<div class="mc-row"><div class="mc-row__key">Agent ID</div><div class="mc-row__value">${job.agentId}</div></div>` : nothing}
-                    </div>
+                    <details class="mc-details" style="margin-top: 8px;">
+                      <summary>Details</summary>
+                      <div class="mc-nested-grid" style="margin-top: 8px;">
+                        <div class="mc-row"><div class="mc-row__key">ID</div><div class="mc-row__value">${id}</div></div>
+                        ${typeof job.createdAtMs === "number" ? html`<div class="mc-row"><div class="mc-row__key">Created</div><div class="mc-row__value">${this.formatMs(job.createdAtMs)}</div></div>` : nothing}
+                        ${typeof job.updatedAtMs === "number" ? html`<div class="mc-row"><div class="mc-row__key">Updated</div><div class="mc-row__value">${this.formatMs(job.updatedAtMs)}</div></div>` : nothing}
+                        ${job.description ? html`<div class="mc-row"><div class="mc-row__key">Description</div><div class="mc-row__value">${job.description}</div></div>` : nothing}
+                        <div class="mc-row"><div class="mc-row__key">Schedule</div><div class="mc-row__value">${this.formatScheduleSummary(job)}</div></div>
+                        <div class="mc-row"><div class="mc-row__key">Session Target</div><div class="mc-row__value">${this.formatSessionTarget(job)}</div></div>
+                        <div class="mc-row"><div class="mc-row__key">Wake Mode</div><div class="mc-row__value">${this.formatWakeMode(job)}</div></div>
+                        <div class="mc-row"><div class="mc-row__key">Payload</div><div class="mc-row__value">${this.formatPayloadSummary(job)}</div></div>
+                        ${this.renderJobState(job)}
+                        ${this.renderRunSparkline(job)}
+                        ${job.agentId ? html`<div class="mc-row"><div class="mc-row__key">Agent ID</div><div class="mc-row__value">${job.agentId}</div></div>` : nothing}
+                      </div>
+                    </details>
                   </article>
                 `;
               })
