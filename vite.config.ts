@@ -4,6 +4,7 @@ export default defineConfig({
   root: ".",
   base: "/chatui/",
   server: {
-    port: 5173,
+    port: 8083,
+    allowedHosts: [".nip.io", "localhost", "127.0.0.1"],
   },
 });
