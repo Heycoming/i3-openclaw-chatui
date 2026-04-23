@@ -1,5 +1,16 @@
 import { LitElement, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import {
+  cloneLayout,
+  createLayout,
+  createWidgetId,
+  deleteDashboardLayout,
+  loadDashboardLayout,
+  saveDashboardLayout,
+  type DashboardLayoutFile,
+  type DashboardWidgetDefinition,
+  type DashboardWidgetLayout,
+} from "./dashboard-layout.js";
 
 interface MissionControlEvent {
   id?: number | string;
@@ -112,6 +123,11 @@ export class MissionControlView extends LitElement {
   @property({ type: String }) gatewayUrl = "";
 
   @state() private loading = false;
+  @state() private layoutEditorOpen = false;
+  @state() private layoutPaletteOpen = false;
+  @state() private layoutSaving = false;
+  @state() private layoutError = "";
+  @state() private widgetLayout: DashboardLayoutFile = this.createDefaultLayout();
   @state() private tasks: MissionControlTask[] = [];
   @state() private dbPath = "-";
   @state() private generatedAt = "";
@@ -141,7 +157,53 @@ export class MissionControlView extends LitElement {
   private readonly apiPath = "/api/mission-control/chatui";
   private readonly subagentRunsPath = "/api/subagents/runs";
   private readonly subagentSessionsPath = "/api/subagents/sessions";
+  private readonly layoutPage = "mission-control" as const;
+  private readonly widgetDefinitions: DashboardWidgetDefinition[] = [
+    {
+      type: "task-summary",
+      title: "Latest task",
+      description: "A compact snapshot of the most recent task",
+      defaultSize: "small",
+      allowedSizes: ["small", "medium", "large"],
+    },
+    {
+      type: "task-metrics",
+      title: "Task metrics",
+      description: "Counts, totals, and error signals across tasks",
+      defaultSize: "small",
+      allowedSizes: ["small", "medium", "large"],
+    },
+    {
+      type: "task-recent-list",
+      title: "Recent tasks",
+      description: "A rolling list of the latest tasks",
+      defaultSize: "medium",
+      allowedSizes: ["small", "medium", "large"],
+    },
+    {
+      type: "task-history",
+      title: "Task history",
+      description: "A denser history view of recent work",
+      defaultSize: "large",
+      allowedSizes: ["medium", "large"],
+    },
+    {
+      type: "task-filters",
+      title: "Filters",
+      description: "The existing filter controls for task search",
+      defaultSize: "large",
+      allowedSizes: ["large"],
+    },
+    {
+      type: "subagent-summary",
+      title: "Subagent activity",
+      description: "A quick view of runs and sessions tied to the current data",
+      defaultSize: "medium",
+      allowedSizes: ["small", "medium", "large"],
+    },
+  ];
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private layoutSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private openDetails = new Set<string>();
 
   createRenderRoot() {
@@ -152,6 +214,7 @@ export class MissionControlView extends LitElement {
     super.connectedCallback();
     this.initializeDefaultTimes();
     void this.refresh();
+    void this.loadWidgetLayout();
     this.refreshTimer = setInterval(() => {
       void this.refresh();
     }, 3000);
@@ -179,6 +242,160 @@ export class MissionControlView extends LitElement {
       clearInterval(this.refreshTimer);
       this.refreshTimer = null;
     }
+    if (this.layoutSaveTimer) {
+      clearTimeout(this.layoutSaveTimer);
+      this.layoutSaveTimer = null;
+    }
+  }
+
+  private createDefaultLayout() {
+    return createLayout([
+      { id: "task-summary", type: "task-summary", size: "small" },
+      { id: "task-metrics", type: "task-metrics", size: "small" },
+      { id: "recent-tasks", type: "task-recent-list", size: "medium" },
+      { id: "task-history", type: "task-history", size: "large" },
+      { id: "task-filters", type: "task-filters", size: "large" },
+      { id: "subagent-activity", type: "subagent-summary", size: "medium" },
+    ]);
+  }
+
+  private getWidgetDefinition(type: string) {
+    return this.widgetDefinitions.find((widget) => widget.type === type) ?? null;
+  }
+
+  private getWidgetLabel(widget: DashboardWidgetLayout) {
+    return this.getWidgetDefinition(widget.type)?.title ?? widget.type;
+  }
+
+  private getWidgetDescription(widget: DashboardWidgetLayout) {
+    return this.getWidgetDefinition(widget.type)?.description ?? "";
+  }
+
+  private getWidgetSpan(size: DashboardWidgetLayout["size"]) {
+    if (size === "large") return 12;
+    if (size === "medium") return 6;
+    return 4;
+  }
+
+  private async loadWidgetLayout() {
+    const saved = await loadDashboardLayout(this.layoutPage);
+    if (saved) {
+      this.widgetLayout = cloneLayout(saved);
+    }
+  }
+
+  private scheduleLayoutSave() {
+    if (this.layoutSaveTimer) {
+      clearTimeout(this.layoutSaveTimer);
+    }
+
+    this.layoutSaveTimer = setTimeout(() => {
+      this.layoutSaveTimer = null;
+      void this.persistLayout();
+    }, 150);
+  }
+
+  private async persistLayout() {
+    this.layoutSaving = true;
+    this.layoutError = "";
+
+    try {
+      await saveDashboardLayout(this.layoutPage, this.widgetLayout);
+    } catch (error) {
+      this.layoutError = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.layoutSaving = false;
+    }
+  }
+
+  private async resetLayout() {
+    this.widgetLayout = this.createDefaultLayout();
+    this.layoutEditorOpen = false;
+    this.layoutPaletteOpen = false;
+
+    try {
+      await deleteDashboardLayout(this.layoutPage);
+    } catch (error) {
+      this.layoutError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  private toggleLayoutEditor() {
+    this.layoutEditorOpen = !this.layoutEditorOpen;
+    if (this.layoutEditorOpen && !this.widgetLayout.widgets.length) {
+      this.widgetLayout = this.createDefaultLayout();
+    }
+  }
+
+  private updateWidgetLayout(mutator: (widgets: DashboardWidgetLayout[]) => DashboardWidgetLayout[]) {
+    this.widgetLayout = createLayout(mutator([...this.widgetLayout.widgets]));
+    this.scheduleLayoutSave();
+  }
+
+  private addWidget(type: string) {
+    const definition = this.getWidgetDefinition(type);
+    if (!definition) return;
+
+    this.updateWidgetLayout((widgets) => [
+      ...widgets,
+      { id: createWidgetId(type), type, size: definition.defaultSize },
+    ]);
+  }
+
+  private removeWidget(widgetId: string) {
+    this.updateWidgetLayout((widgets) => widgets.filter((widget) => widget.id !== widgetId));
+  }
+
+  private setWidgetSize(widgetId: string, size: DashboardWidgetLayout["size"]) {
+    this.updateWidgetLayout((widgets) => widgets.map((widget) => (widget.id === widgetId ? { ...widget, size } : widget)));
+  }
+
+  private moveWidget(widgetId: string, targetWidgetId: string) {
+    this.updateWidgetLayout((widgets) => {
+      const fromIndex = widgets.findIndex((widget) => widget.id === widgetId);
+      const toIndex = widgets.findIndex((widget) => widget.id === targetWidgetId);
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return widgets;
+
+      const next = [...widgets];
+      const [widget] = next.splice(fromIndex, 1);
+      const insertionIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
+      next.splice(insertionIndex, 0, widget);
+      return next;
+    });
+  }
+
+  private onWidgetDragStart(event: DragEvent, widgetId: string) {
+    if (!this.layoutEditorOpen) {
+      event.preventDefault();
+      return;
+    }
+
+    event.dataTransfer?.setData("text/plain", widgetId);
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+    }
+  }
+
+  private onWidgetDrop(event: DragEvent, targetWidgetId: string) {
+    event.preventDefault();
+    const widgetId = event.dataTransfer?.getData("text/plain") || "";
+    if (!widgetId || widgetId === targetWidgetId) return;
+    this.moveWidget(widgetId, targetWidgetId);
+  }
+
+  private onCanvasDrop(event: DragEvent) {
+    event.preventDefault();
+    const widgetId = event.dataTransfer?.getData("text/plain") || "";
+    if (!widgetId) return;
+
+    const widgets = [...this.widgetLayout.widgets];
+    const fromIndex = widgets.findIndex((widget) => widget.id === widgetId);
+    if (fromIndex < 0) return;
+
+    const [widget] = widgets.splice(fromIndex, 1);
+    widgets.push(widget);
+    this.widgetLayout = createLayout(widgets);
+    this.scheduleLayoutSave();
   }
 
   private resolveApiOrigin() {
@@ -742,6 +959,323 @@ export class MissionControlView extends LitElement {
     return `$${value.toFixed(6)}`;
   }
 
+  private getSortedTasks() {
+    return [...this.tasks].sort((left, right) => this.getTaskTimestamp(right) - this.getTaskTimestamp(left));
+  }
+
+  private getTaskTimestamp(task: MissionControlTask) {
+    const raw = task.timestamp || task.createdAt || "";
+    const parsed = raw ? Date.parse(raw) : 0;
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  private getTaskTokenTotal(task: MissionControlTask) {
+    return Number(task.totalTokens ?? task.inputTokens ?? 0) || 0;
+  }
+
+  private getTaskCostTotal(task: MissionControlTask) {
+    return Number(task.estimatedCostUsd ?? 0) || 0;
+  }
+
+  private getTaskCountByStatus(status: string) {
+    const normalized = status.toLowerCase();
+    return this.tasks.filter((task) => (task.status || "").toLowerCase() === normalized).length;
+  }
+
+  private renderMetricCard(label: string, value: unknown, tone: string = "") {
+    return html`
+      <div class="widget-metric ${tone ? `widget-metric--${tone}` : ""}">
+        <div class="widget-metric__label">${label}</div>
+        <div class="widget-metric__value">${value ?? "-"}</div>
+      </div>
+    `;
+  }
+
+  private renderTaskSummaryWidget(size: DashboardWidgetLayout["size"]) {
+    const task = this.getSortedTasks()[0];
+    if (!task) {
+      return html`<div class="widget-empty">No task logs available yet.</div>`;
+    }
+
+    const promptPreview = task.prompt ? task.prompt.slice(0, size === "small" ? 90 : size === "medium" ? 160 : 260) : "-";
+    const responsePreview = task.response
+      ? (typeof task.response === "string"
+        ? task.response.slice(0, size === "small" ? 90 : 180)
+        : JSON.stringify(task.response).slice(0, size === "small" ? 90 : 180))
+      : "-";
+
+    return html`
+      <div class="widget-stack">
+        <div class="widget-row"><span>Status</span><strong>${task.status || "unknown"}</strong></div>
+        <div class="widget-row"><span>Run</span><strong>${task.runId || "-"}</strong></div>
+        <div class="widget-row"><span>Session</span><strong>${task.sessionKey || task.sessionId || "-"}</strong></div>
+        <div class="widget-row"><span>Agent</span><strong>${task.agentId || "-"}</strong></div>
+        <div class="widget-row"><span>At</span><strong>${this.formatDate(task.timestamp)}</strong></div>
+        <div class="widget-row"><span>Tokens</span><strong>${this.formatTokenCount(task.totalTokens ?? task.inputTokens)}</strong></div>
+        <div class="widget-row"><span>Cost</span><strong>${this.formatUsd(task.estimatedCostUsd)}</strong></div>
+        ${size !== "small" ? html`<p class="widget-preview">${promptPreview}</p>` : nothing}
+        ${size === "large" ? html`
+          <div class="widget-stack widget-stack--compact">
+            <div class="widget-row"><span>Response</span><strong>${responsePreview}</strong></div>
+            <div class="widget-row"><span>Events</span><strong>${Array.isArray(task.events) ? task.events.length : 0}</strong></div>
+            <div class="widget-row"><span>Documents</span><strong>${Array.isArray(task.documents) ? task.documents.length : 0}</strong></div>
+          </div>
+        ` : nothing}
+      </div>
+    `;
+  }
+
+  private renderTaskMetricsWidget(size: DashboardWidgetLayout["size"]) {
+    const totalTokens = this.tasks.reduce((sum, task) => sum + this.getTaskTokenTotal(task), 0);
+    const totalCost = this.tasks.reduce((sum, task) => sum + this.getTaskCostTotal(task), 0);
+    const errorCount = this.tasks.filter((task) => Boolean(task.error)).length;
+
+    return html`
+      <div class="widget-grid widget-grid--metrics">
+        ${this.renderMetricCard("Total", this.tasks.length, "primary")}
+        ${this.renderMetricCard("Active", this.getTaskCountByStatus("running") + this.getTaskCountByStatus("progress"), "success")}
+        ${this.renderMetricCard("Errors", errorCount, "danger")}
+        ${this.renderMetricCard("Tokens", totalTokens.toLocaleString(), "neutral")}
+        ${size !== "small" ? this.renderMetricCard("Cost", this.formatUsd(totalCost), "neutral") : nothing}
+        ${size === "large" ? this.renderMetricCard("Subagent runs", this.subagentRuns.length, "accent") : nothing}
+      </div>
+    `;
+  }
+
+  private renderTaskRecentListWidget(size: DashboardWidgetLayout["size"]) {
+    const limit = size === "small" ? 3 : size === "medium" ? 5 : 8;
+    const tasks = this.getSortedTasks().slice(0, limit);
+
+    if (!tasks.length) {
+      return html`<div class="widget-empty">No recent tasks yet.</div>`;
+    }
+
+    return html`
+      <div class="widget-list">
+        ${tasks.map((task) => html`
+          <article class="widget-list-item">
+            <div class="widget-list-item__title-row">
+              <span class="badge ${this.statusBadgeClass(task.status)}">${task.status || "unknown"}</span>
+              <strong>${task.runId || task.id || "task"}</strong>
+            </div>
+            <div class="widget-list-item__body">${task.title || task.prompt || "Untitled task"}</div>
+            <div class="widget-list-item__meta">
+              <span>${this.formatDate(task.timestamp)}</span>
+              <span>${this.formatTokenCount(task.totalTokens ?? task.inputTokens)} tokens</span>
+              <span>${this.formatUsd(task.estimatedCostUsd)}</span>
+            </div>
+          </article>
+        `)}
+      </div>
+    `;
+  }
+
+  private renderTaskHistoryWidget(size: DashboardWidgetLayout["size"]) {
+    const limit = size === "medium" ? 4 : 6;
+    const tasks = this.getSortedTasks().slice(0, limit);
+
+    if (!tasks.length) {
+      return html`<div class="widget-empty">Task history is empty.</div>`;
+    }
+
+    return html`
+      <div class="widget-history">
+        ${tasks.map((task) => html`
+          <article class="widget-history-item">
+            <header class="widget-history-item__header">
+              <span class="badge ${this.statusBadgeClass(task.status)}">${task.status || "unknown"}</span>
+              <strong>${task.runId || task.id || "task"}</strong>
+              <span>${this.formatDate(task.timestamp)}</span>
+            </header>
+            <div class="widget-history-item__summary">
+              <span>${task.sessionKey || task.sessionId || "-"}</span>
+              <span>${task.agentId || "-"}</span>
+              <span>${this.formatTokenCount(task.totalTokens ?? task.inputTokens)} tokens</span>
+            </div>
+            <p class="widget-preview">${task.title || task.prompt || task.description || "No description"}</p>
+          </article>
+        `)}
+      </div>
+    `;
+  }
+
+  private renderTaskFiltersWidget() {
+    return html`
+      <div class="widget-stack">
+        <div class="widget-row">
+          <span>Filters and pagination</span>
+          <button class="btn btn--ghost btn--sm" @click=${() => { this.showFilters = !this.showFilters; }}>
+            ${this.showFilters ? "Hide filters" : "Show filters"}
+          </button>
+        </div>
+        ${this.renderFilterPanel()}
+        ${this.renderPagination()}
+      </div>
+    `;
+  }
+
+  private renderSubagentSummaryWidget(size: DashboardWidgetLayout["size"]) {
+    const recentRuns = this.subagentRuns.slice(0, size === "small" ? 3 : 5);
+    const recentSessions = this.subagentSessions.slice(0, size === "small" ? 2 : 4);
+
+    return html`
+      <div class="widget-stack">
+        <div class="widget-grid widget-grid--compact">
+          ${this.renderMetricCard("Runs", this.subagentRuns.length, "accent")}
+          ${this.renderMetricCard("Sessions", this.subagentSessions.length, "primary")}
+        </div>
+        ${size !== "small" ? html`
+          <div class="widget-list widget-list--compact">
+            ${recentRuns.map((run) => html`<div class="widget-list-item"><strong>${run.runId}</strong><div class="widget-list-item__body">${typeof run.entry === "object" ? "Structured entry" : String(run.entry ?? "-")}</div></div>`)}
+          </div>
+        ` : nothing}
+        ${size === "large" ? html`
+          <div class="widget-list widget-list--compact">
+            ${recentSessions.map((session) => html`<div class="widget-list-item"><strong>${session.label || session.sessionId || "session"}</strong><div class="widget-list-item__body">${session.key || "-"}</div></div>`)}
+          </div>
+        ` : nothing}
+      </div>
+    `;
+  }
+
+  private renderWidgetContent(widget: DashboardWidgetLayout) {
+    switch (widget.type) {
+      case "task-summary":
+        return this.renderTaskSummaryWidget(widget.size);
+      case "task-metrics":
+        return this.renderTaskMetricsWidget(widget.size);
+      case "task-recent-list":
+        return this.renderTaskRecentListWidget(widget.size);
+      case "task-history":
+        return this.renderTaskHistoryWidget(widget.size);
+      case "task-filters":
+        return this.renderTaskFiltersWidget();
+      case "subagent-summary":
+        return this.renderSubagentSummaryWidget(widget.size);
+      default:
+        return html`<div class="widget-empty">Unknown widget: ${widget.type}</div>`;
+    }
+  }
+
+  private renderWidgetCard(widget: DashboardWidgetLayout) {
+    const definition = this.getWidgetDefinition(widget.type);
+    const span = this.getWidgetSpan(widget.size);
+
+    return html`
+      <article
+        class="dashboard-widget dashboard-widget--${widget.size} ${this.layoutEditorOpen ? "dashboard-widget--editing" : ""}"
+        style=${`grid-column: span ${span};`}
+        draggable=${this.layoutEditorOpen ? "true" : "false"}
+        @dragstart=${(event: DragEvent) => this.onWidgetDragStart(event, widget.id)}
+        @dragover=${(event: DragEvent) => event.preventDefault()}
+        @drop=${(event: DragEvent) => this.onWidgetDrop(event, widget.id)}
+      >
+        <header class="dashboard-widget__header">
+          <div class="dashboard-widget__title-group">
+            <span class="dashboard-widget__grip" title="Drag to reorder">⠿</span>
+            <div>
+              <h3>${definition?.title ?? widget.type}</h3>
+              ${definition?.description ? html`<p>${definition.description}</p>` : nothing}
+            </div>
+          </div>
+
+          ${this.layoutEditorOpen ? html`
+            <div class="dashboard-widget__actions">
+              <select
+                class="field__select dashboard-widget__size-select"
+                .value=${widget.size}
+                @change=${(event: Event) => this.setWidgetSize(widget.id, (event.target as HTMLSelectElement).value as DashboardWidgetLayout["size"])}
+              >
+                ${(definition?.allowedSizes ?? ["small", "medium", "large"]).map((size) => html`<option value=${size}>${size}</option>`) }
+              </select>
+              <button class="btn btn--ghost btn--sm" @click=${() => this.removeWidget(widget.id)}>Remove</button>
+            </div>
+          ` : nothing}
+        </header>
+
+        <div class="dashboard-widget__body">
+          ${this.layoutEditorOpen ? html`<div class="dashboard-widget__drop-hint">Drop another widget here to reshuffle the layout.</div>` : nothing}
+          ${this.renderWidgetContent(widget)}
+        </div>
+      </article>
+    `;
+  }
+
+  private renderWidgetEditorToolbar() {
+    return html`
+      <div class="dashboard-toolbar">
+        <div class="dashboard-toolbar__meta">
+          <span class="badge badge--warn">Editable layout</span>
+          <span>${this.layoutSaving ? "Saving layout..." : "Saved layout is read on every visit"}</span>
+        </div>
+        <div class="dashboard-toolbar__actions">
+          <button class="btn btn--ghost btn--sm" @click=${() => { this.layoutPaletteOpen = !this.layoutPaletteOpen; }}>
+            ${this.layoutPaletteOpen ? "Close widget picker" : "Add widget"}
+          </button>
+          <button class="btn btn--ghost btn--sm" @click=${() => void this.resetLayout()}>
+            Reset layout
+          </button>
+          <button class="btn btn--primary btn--sm" @click=${() => { this.layoutEditorOpen = false; }}>
+            Done editing
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderWidgetPalette() {
+    if (!this.layoutPaletteOpen) return nothing;
+
+    return html`
+      <section class="dashboard-palette">
+        ${this.widgetDefinitions.map((widget) => html`
+          <button class="dashboard-palette__item" @click=${() => this.addWidget(widget.type)}>
+            <strong>${widget.title}</strong>
+            <span>${widget.description}</span>
+          </button>
+        `)}
+      </section>
+    `;
+  }
+
+  private renderWidgetDashboard() {
+    return html`
+      <section class="content mission-control mission-control--widgets">
+        <header class="content__header mission-control__header">
+          <div>
+            <h1 class="content__title">Mission Control Widgets</h1>
+            <p class="mission-control__meta">Drag widgets around, change sizes, and save a custom layout for this dashboard.</p>
+          </div>
+          <div class="content__actions">
+            <button class="btn btn--ghost btn--sm" @click=${() => void this.refresh()}>
+              ${this.loading ? "Refreshing..." : "Refresh"}
+            </button>
+            <button class="btn btn--primary btn--sm" @click=${() => this.toggleLayoutEditor()}>
+              ${this.layoutEditorOpen ? "Close editor" : "Edit layout"}
+            </button>
+          </div>
+        </header>
+
+        <div class="mission-control__pills">
+          <span class="badge">DB: ${this.dbPath}</span>
+          <span class="badge">Updated: ${this.generatedAt ? this.formatDate(this.generatedAt) : "-"}</span>
+          <span class="badge">Auto refresh: 3s</span>
+          <span class="badge">Tasks on page: ${this.tasks.length}</span>
+        </div>
+
+        ${this.layoutError ? html`<div class="callout callout--danger">${this.layoutError}</div>` : nothing}
+        ${this.error ? html`<div class="callout callout--danger">${this.error}</div>` : nothing}
+
+        ${this.layoutEditorOpen ? this.renderWidgetEditorToolbar() : nothing}
+        ${this.layoutEditorOpen ? this.renderWidgetPalette() : nothing}
+
+        <section class="dashboard-grid" @dragover=${(event: DragEvent) => event.preventDefault()} @drop=${(event: DragEvent) => this.onCanvasDrop(event)}>
+          ${this.widgetLayout.widgets.map((widget) => this.renderWidgetCard(widget))}
+        </section>
+      </section>
+    `;
+  }
+
   private renderTask(task: MissionControlTask) {
     const baseKey = `task:${task.id || task.runId || "unknown"}`;
     const taskTitle = task.prompt
@@ -986,12 +1520,6 @@ export class MissionControlView extends LitElement {
         </div>
       </footer>
     `;
-  }
-
-  private getTaskTimestamp(task: MissionControlTask) {
-    const raw = task.timestamp || task.createdAt || "";
-    const parsed = raw ? Date.parse(raw) : Number.NaN;
-    return Number.isNaN(parsed) ? 0 : parsed;
   }
 
   private truncateText(value: string, maxLength = 96) {

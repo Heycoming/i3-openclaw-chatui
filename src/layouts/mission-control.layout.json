@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "widgets": [
+    { "id": "task-summary", "type": "task-summary", "size": "small" },
+    { "id": "task-metrics", "type": "task-metrics", "size": "small" },
+    { "id": "recent-tasks", "type": "task-recent-list", "size": "medium" },
+    { "id": "task-history", "type": "task-history", "size": "large" },
+    { "id": "subagent-activity", "type": "subagent-summary", "size": "medium" }
+  ]
+}

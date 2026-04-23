@@ -1,5 +1,16 @@
 import { LitElement, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import {
+  cloneLayout,
+  createLayout,
+  createWidgetId,
+  deleteDashboardLayout,
+  loadDashboardLayout,
+  saveDashboardLayout,
+  type DashboardLayoutFile,
+  type DashboardWidgetDefinition,
+  type DashboardWidgetLayout,
+} from "./dashboard-layout.js";
 
 type CronJobRecord = Record<string, unknown>;
 
@@ -36,6 +47,11 @@ export class CronJobsView extends LitElement {
   @property({ type: String }) gatewayUrl = "";
 
   @state() private loading = false;
+  @state() private layoutEditorOpen = false;
+  @state() private layoutPaletteOpen = false;
+  @state() private layoutSaving = false;
+  @state() private layoutError = "";
+  @state() private widgetLayout: DashboardLayoutFile = this.createDefaultLayout();
   @state() private error = "";
   @state() private jobs: CronJobRecord[] = [];
   @state() private runs: CronRunRecord[] = [];
@@ -74,8 +90,54 @@ export class CronJobsView extends LitElement {
   private readonly runsPath = "/api/cron/runs?limit=150";
   private readonly runActionPath = "/api/cron/run";
   private readonly wakePath = "/api/cron/wake";
+  private readonly layoutPage = "cron-jobs" as const;
+  private readonly widgetDefinitions: DashboardWidgetDefinition[] = [
+    {
+      type: "cron-next-job",
+      title: "Soonest job",
+      description: "The job due to run next",
+      defaultSize: "small",
+      allowedSizes: ["small", "medium", "large"],
+    },
+    {
+      type: "cron-latest-run",
+      title: "Latest run",
+      description: "The most recent cron execution",
+      defaultSize: "small",
+      allowedSizes: ["small", "medium", "large"],
+    },
+    {
+      type: "cron-run-history",
+      title: "Run history",
+      description: "Recent cron executions and outcomes",
+      defaultSize: "medium",
+      allowedSizes: ["small", "medium", "large"],
+    },
+    {
+      type: "cron-upcoming-timeline",
+      title: "Next 24 hours",
+      description: "The upcoming execution timeline",
+      defaultSize: "large",
+      allowedSizes: ["large"],
+    },
+    {
+      type: "cron-job-list",
+      title: "Job list",
+      description: "The editable job list and action controls",
+      defaultSize: "large",
+      allowedSizes: ["medium", "large"],
+    },
+    {
+      type: "cron-summary",
+      title: "Cron summary",
+      description: "A quick snapshot of counts and scheduler health",
+      defaultSize: "small",
+      allowedSizes: ["small", "medium", "large"],
+    },
+  ];
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private clockTimer: ReturnType<typeof setInterval> | null = null;
+  private layoutSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   createRenderRoot() {
     return this;
@@ -85,6 +147,7 @@ export class CronJobsView extends LitElement {
     super.connectedCallback();
     void this.refresh();
     this.loadAgents();
+    void this.loadWidgetLayout();
     this.refreshTimer = setInterval(() => {
       void this.refresh();
     }, 5000);
@@ -103,6 +166,152 @@ export class CronJobsView extends LitElement {
       clearInterval(this.clockTimer);
       this.clockTimer = null;
     }
+    if (this.layoutSaveTimer) {
+      clearTimeout(this.layoutSaveTimer);
+      this.layoutSaveTimer = null;
+    }
+  }
+
+  private createDefaultLayout() {
+    return createLayout([
+      { id: "cron-next-job", type: "cron-next-job", size: "small" },
+      { id: "cron-latest-run", type: "cron-latest-run", size: "small" },
+      { id: "cron-summary", type: "cron-summary", size: "small" },
+      { id: "cron-run-history", type: "cron-run-history", size: "medium" },
+      { id: "cron-upcoming-timeline", type: "cron-upcoming-timeline", size: "large" },
+      { id: "cron-job-list", type: "cron-job-list", size: "large" },
+    ]);
+  }
+
+  private getWidgetDefinition(type: string) {
+    return this.widgetDefinitions.find((widget) => widget.type === type) ?? null;
+  }
+
+  private getWidgetSpan(size: DashboardWidgetLayout["size"]) {
+    if (size === "large") return 12;
+    if (size === "medium") return 6;
+    return 4;
+  }
+
+  private async loadWidgetLayout() {
+    const saved = await loadDashboardLayout(this.layoutPage);
+    if (saved) {
+      this.widgetLayout = cloneLayout(saved);
+    }
+  }
+
+  private scheduleLayoutSave() {
+    if (this.layoutSaveTimer) {
+      clearTimeout(this.layoutSaveTimer);
+    }
+
+    this.layoutSaveTimer = setTimeout(() => {
+      this.layoutSaveTimer = null;
+      void this.persistLayout();
+    }, 150);
+  }
+
+  private async persistLayout() {
+    this.layoutSaving = true;
+    this.layoutError = "";
+
+    try {
+      await saveDashboardLayout(this.layoutPage, this.widgetLayout);
+    } catch (error) {
+      this.layoutError = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.layoutSaving = false;
+    }
+  }
+
+  private async resetLayout() {
+    this.widgetLayout = this.createDefaultLayout();
+    this.layoutEditorOpen = false;
+    this.layoutPaletteOpen = false;
+
+    try {
+      await deleteDashboardLayout(this.layoutPage);
+    } catch (error) {
+      this.layoutError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  private toggleLayoutEditor() {
+    this.layoutEditorOpen = !this.layoutEditorOpen;
+    if (this.layoutEditorOpen && !this.widgetLayout.widgets.length) {
+      this.widgetLayout = this.createDefaultLayout();
+    }
+  }
+
+  private updateWidgetLayout(mutator: (widgets: DashboardWidgetLayout[]) => DashboardWidgetLayout[]) {
+    this.widgetLayout = createLayout(mutator([...this.widgetLayout.widgets]));
+    this.scheduleLayoutSave();
+  }
+
+  private addWidget(type: string) {
+    const definition = this.getWidgetDefinition(type);
+    if (!definition) return;
+
+    this.updateWidgetLayout((widgets) => [
+      ...widgets,
+      { id: createWidgetId(type), type, size: definition.defaultSize },
+    ]);
+  }
+
+  private removeWidget(widgetId: string) {
+    this.updateWidgetLayout((widgets) => widgets.filter((widget) => widget.id !== widgetId));
+  }
+
+  private setWidgetSize(widgetId: string, size: DashboardWidgetLayout["size"]) {
+    this.updateWidgetLayout((widgets) => widgets.map((widget) => (widget.id === widgetId ? { ...widget, size } : widget)));
+  }
+
+  private moveWidget(widgetId: string, targetWidgetId: string) {
+    this.updateWidgetLayout((widgets) => {
+      const fromIndex = widgets.findIndex((widget) => widget.id === widgetId);
+      const toIndex = widgets.findIndex((widget) => widget.id === targetWidgetId);
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return widgets;
+
+      const next = [...widgets];
+      const [widget] = next.splice(fromIndex, 1);
+      const insertionIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
+      next.splice(insertionIndex, 0, widget);
+      return next;
+    });
+  }
+
+  private onWidgetDragStart(event: DragEvent, widgetId: string) {
+    if (!this.layoutEditorOpen) {
+      event.preventDefault();
+      return;
+    }
+
+    event.dataTransfer?.setData("text/plain", widgetId);
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+    }
+  }
+
+  private onWidgetDrop(event: DragEvent, targetWidgetId: string) {
+    event.preventDefault();
+    const widgetId = event.dataTransfer?.getData("text/plain") || "";
+    if (!widgetId || widgetId === targetWidgetId) return;
+    this.moveWidget(widgetId, targetWidgetId);
+  }
+
+  private onCanvasDrop(event: DragEvent) {
+    event.preventDefault();
+    const widgetId = event.dataTransfer?.getData("text/plain") || "";
+    if (!widgetId) return;
+
+    const widgets = [...this.widgetLayout.widgets];
+    const fromIndex = widgets.findIndex((widget) => widget.id === widgetId);
+    if (fromIndex < 0) return;
+
+    const [widget] = widgets.splice(fromIndex, 1);
+    widgets.push(widget);
+    this.widgetLayout = createLayout(widgets);
+    this.scheduleLayoutSave();
   }
 
   private resolveApiOrigin() {
@@ -407,6 +616,247 @@ export class CronJobsView extends LitElement {
     const mm = String(minutes).padStart(2, "0");
     const ss = String(seconds).padStart(2, "0");
     return `${dd}:${hh}:${mm}:${ss}`;
+  }
+
+  private getSortedRuns() {
+    return [...this.runs].sort((left, right) => (Number(right.ts ?? 0) || 0) - (Number(left.ts ?? 0) || 0));
+  }
+
+  private getEnabledJobCount() {
+    return this.jobs.filter((job) => typeof job.enabled !== "boolean" || job.enabled).length;
+  }
+
+  private getSoonestJob() {
+    return this.getJobsSortedByNextRun()[0] ?? null;
+  }
+
+  private getLatestRun() {
+    return this.getSortedRuns()[0] ?? null;
+  }
+
+  private getJobSizeLimit(size: DashboardWidgetLayout["size"]) {
+    if (size === "small") return 3;
+    if (size === "medium") return 5;
+    return 8;
+  }
+
+  private renderMetricCard(label: string, value: unknown, tone: string = "") {
+    return html`
+      <div class="widget-metric ${tone ? `widget-metric--${tone}` : ""}">
+        <div class="widget-metric__label">${label}</div>
+        <div class="widget-metric__value">${value ?? "-"}</div>
+      </div>
+    `;
+  }
+
+  private renderCronSummaryWidget(size: DashboardWidgetLayout["size"]) {
+    const soonestJob = this.getSoonestJob();
+    return html`
+      <div class="widget-grid widget-grid--metrics">
+        ${this.renderMetricCard("Jobs", this.jobs.length, "primary")}
+        ${this.renderMetricCard("Enabled", this.getEnabledJobCount(), "success")}
+        ${this.renderMetricCard("Runs", this.runs.length, "accent")}
+        ${this.renderMetricCard("Wake", this.actionBusy ? "busy" : "ready", "neutral")}
+        ${size !== "small" ? this.renderMetricCard("Next", soonestJob ? this.getJobLabel(soonestJob) : "-", "neutral") : nothing}
+      </div>
+    `;
+  }
+
+  private renderNextJobWidget(size: DashboardWidgetLayout["size"]) {
+    const job = this.getSoonestJob();
+    if (!job) {
+      return html`<div class="widget-empty">No scheduled jobs are ready yet.</div>`;
+    }
+
+    return html`
+      <div class="widget-stack">
+        <div class="widget-row"><span>Countdown</span><strong>${this.formatJobCountdownInline(job)}</strong></div>
+        <div class="widget-row"><span>Name</span><strong>${this.getJobLabel(job)}</strong></div>
+        <div class="widget-row"><span>Schedule</span><strong>${this.formatScheduleSummary(job)}</strong></div>
+        <div class="widget-row"><span>Session</span><strong>${this.formatSessionTarget(job)}</strong></div>
+        ${size !== "small" ? html`<div class="widget-row"><span>Wake</span><strong>${this.formatWakeMode(job)}</strong></div>` : nothing}
+        ${size === "large" ? html`<div class="widget-row"><span>Payload</span><strong>${this.formatPayloadSummary(job)}</strong></div>` : nothing}
+      </div>
+    `;
+  }
+
+  private renderLatestRunWidget(size: DashboardWidgetLayout["size"]) {
+    const run = this.getLatestRun();
+    if (!run) {
+      return html`<div class="widget-empty">No cron runs have been recorded yet.</div>`;
+    }
+
+    return html`
+      <div class="widget-stack">
+        <div class="widget-row"><span>Status</span><strong>${run.status || "run"}</strong></div>
+        <div class="widget-row"><span>Job</span><strong>${run.jobId || "-"}</strong></div>
+        <div class="widget-row"><span>At</span><strong>${this.formatRunTs(run.ts)}</strong></div>
+        ${size !== "small" ? html`<div class="widget-row"><span>Action</span><strong>${run.action || "-"}</strong></div>` : nothing}
+        ${size === "large" ? html`<div class="widget-row"><span>Summary</span><strong>${run.summary || "-"}</strong></div>` : nothing}
+        ${size === "large" && run.error ? html`<div class="widget-row"><span>Error</span><strong>${run.error}</strong></div>` : nothing}
+      </div>
+    `;
+  }
+
+  private renderRunHistoryWidget(size: DashboardWidgetLayout["size"]) {
+    const runs = this.getSortedRuns().slice(0, this.getJobSizeLimit(size));
+    if (!runs.length) {
+      return html`<div class="widget-empty">No cron runs found.</div>`;
+    }
+
+    return html`
+      <div class="widget-list">
+        ${runs.map((run, index) => html`
+          <article class="widget-list-item">
+            <div class="widget-list-item__title-row">
+              <span class="badge">${run.status || "run"}</span>
+              <strong>${run.jobId || `run-${index + 1}`}</strong>
+            </div>
+            <div class="widget-list-item__meta">
+              <span>${this.formatRunTs(run.ts)}</span>
+              <span>${run.action || "-"}</span>
+            </div>
+            <div class="widget-list-item__body">${run.summary || run.error || "No summary available"}</div>
+          </article>
+        `)}
+      </div>
+    `;
+  }
+
+  private renderWidgetContent(widget: DashboardWidgetLayout) {
+    switch (widget.type) {
+      case "cron-next-job":
+        return this.renderNextJobWidget(widget.size);
+      case "cron-latest-run":
+        return this.renderLatestRunWidget(widget.size);
+      case "cron-run-history":
+        return this.renderRunHistoryWidget(widget.size);
+      case "cron-upcoming-timeline":
+        return this.renderTimelineView();
+      case "cron-job-list":
+        return this.renderJobsList();
+      case "cron-summary":
+        return this.renderCronSummaryWidget(widget.size);
+      default:
+        return html`<div class="widget-empty">Unknown widget: ${widget.type}</div>`;
+    }
+  }
+
+  private renderWidgetCard(widget: DashboardWidgetLayout) {
+    const definition = this.getWidgetDefinition(widget.type);
+    const span = this.getWidgetSpan(widget.size);
+
+    return html`
+      <article
+        class="dashboard-widget dashboard-widget--${widget.size} ${this.layoutEditorOpen ? "dashboard-widget--editing" : ""}"
+        style=${`grid-column: span ${span};`}
+        draggable=${this.layoutEditorOpen ? "true" : "false"}
+        @dragstart=${(event: DragEvent) => this.onWidgetDragStart(event, widget.id)}
+        @dragover=${(event: DragEvent) => event.preventDefault()}
+        @drop=${(event: DragEvent) => this.onWidgetDrop(event, widget.id)}
+      >
+        <header class="dashboard-widget__header">
+          <div class="dashboard-widget__title-group">
+            <span class="dashboard-widget__grip" title="Drag to reorder">⠿</span>
+            <div>
+              <h3>${definition?.title ?? widget.type}</h3>
+              ${definition?.description ? html`<p>${definition.description}</p>` : nothing}
+            </div>
+          </div>
+
+          ${this.layoutEditorOpen ? html`
+            <div class="dashboard-widget__actions">
+              <select
+                class="field__select dashboard-widget__size-select"
+                .value=${widget.size}
+                @change=${(event: Event) => this.setWidgetSize(widget.id, (event.target as HTMLSelectElement).value as DashboardWidgetLayout["size"])}
+              >
+                ${(definition?.allowedSizes ?? ["small", "medium", "large"]).map((size) => html`<option value=${size}>${size}</option>`) }
+              </select>
+              <button class="btn btn--ghost btn--sm" @click=${() => this.removeWidget(widget.id)}>Remove</button>
+            </div>
+          ` : nothing}
+        </header>
+
+        <div class="dashboard-widget__body">
+          ${this.layoutEditorOpen ? html`<div class="dashboard-widget__drop-hint">Drop another widget here to reshuffle the layout.</div>` : nothing}
+          ${this.renderWidgetContent(widget)}
+        </div>
+      </article>
+    `;
+  }
+
+  private renderWidgetEditorToolbar() {
+    return html`
+      <div class="dashboard-toolbar">
+        <div class="dashboard-toolbar__meta">
+          <span class="badge badge--warn">Editable layout</span>
+          <span>${this.layoutSaving ? "Saving layout..." : "Saved layout is read on every visit"}</span>
+        </div>
+        <div class="dashboard-toolbar__actions">
+          <button class="btn btn--ghost btn--sm" @click=${() => { this.layoutPaletteOpen = !this.layoutPaletteOpen; }}>
+            ${this.layoutPaletteOpen ? "Close widget picker" : "Add widget"}
+          </button>
+          <button class="btn btn--ghost btn--sm" @click=${() => void this.resetLayout()}>
+            Reset layout
+          </button>
+          <button class="btn btn--primary btn--sm" @click=${() => { this.layoutEditorOpen = false; }}>
+            Done editing
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderWidgetPalette() {
+    if (!this.layoutPaletteOpen) return nothing;
+
+    return html`
+      <section class="dashboard-palette">
+        ${this.widgetDefinitions.map((widget) => html`
+          <button class="dashboard-palette__item" @click=${() => this.addWidget(widget.type)}>
+            <strong>${widget.title}</strong>
+            <span>${widget.description}</span>
+          </button>
+        `)}
+      </section>
+    `;
+  }
+
+  private renderWidgetDashboard() {
+    return html`
+      <section class="content mission-control mission-control--widgets">
+        <header class="content__header mission-control__header">
+          <div>
+            <h1 class="content__title">Cron Widgets</h1>
+            <p class="mission-control__meta">Drag widgets around, change sizes, and save a custom layout for the cron dashboard.</p>
+          </div>
+          <div class="content__actions">
+            <button class="btn btn--ghost btn--sm" @click=${() => void this.refresh()}>
+              ${this.loading ? "Refreshing..." : "Refresh"}
+            </button>
+            <button class="btn btn--primary btn--sm" @click=${() => this.toggleLayoutEditor()}>
+              ${this.layoutEditorOpen ? "Close editor" : "Edit layout"}
+            </button>
+          </div>
+        </header>
+
+        ${this.layoutError ? html`<div class="callout callout--danger">${this.layoutError}</div>` : nothing}
+        ${this.error ? html`<div class="callout callout--danger">${this.error}</div>` : nothing}
+        ${this.actionError ? html`<div class="callout callout--danger">${this.actionError}</div>` : nothing}
+        ${this.actionMessage ? html`<div class="callout">${this.actionMessage}</div>` : nothing}
+
+        ${this.layoutEditorOpen ? this.renderWidgetEditorToolbar() : nothing}
+        ${this.layoutEditorOpen ? this.renderWidgetPalette() : nothing}
+
+        <section class="dashboard-grid" @dragover=${(event: DragEvent) => event.preventDefault()} @drop=${(event: DragEvent) => this.onCanvasDrop(event)}>
+          ${this.widgetLayout.widgets.map((widget) => this.renderWidgetCard(widget))}
+        </section>
+
+        ${this.renderFormModal()}
+        ${this.renderDeleteConfirmDialog()}
+      </section>
+    `;
   }
 
   private renderNextRunCountdown(job: CronJobRecord) {
@@ -1136,56 +1586,6 @@ export class CronJobsView extends LitElement {
     }
 
   render() {
-    return html`
-      <section class="content mission-control">
-        <header class="content__header mission-control__header">
-          <div>
-            <h1 class="content__title">Cron Jobs</h1>
-             <p class="mission-control__meta">Manage cron jobs and view their run history.</p>
-          </div>
-          <div class="content__actions">
-            <button class="btn btn--ghost btn--sm" @click=${() => void this.refresh()}>
-              ${this.loading ? "Refreshing..." : "Refresh"}
-            </button>
-          </div>
-        </header>
-
-        ${this.error ? html`<div class="callout callout--danger">${this.error}</div>` : nothing}
-        ${this.actionError ? html`<div class="callout callout--danger">${this.actionError}</div>` : nothing}
-        ${this.actionMessage ? html`<div class="callout">${this.actionMessage}</div>` : nothing}
-
-         ${this.renderTimelineView()}
-         ${this.renderJobsList()}
-
-        <section class="card" style="margin-top: 12px;">
-          <header class="mc-task-card__header">
-            <span class="badge badge--warn">Cron</span>
-             <h3 class="mc-task-card__title">Run History (${this.runs.length})</h3>
-          </header>
-          <div class="mc-nested-list">
-            ${this.runs.length
-              ? this.runs.map((run, index) => html`
-                 <article class="mc-nested-item">
-                   <header class="mc-nested-item__header">
-                     <span class="badge">${run.status || "run"}</span>
-                     <span class="mc-nested-item__title">${run.jobId || `run-${index + 1}`}</span>
-                   </header>
-                   <div class="mc-nested-grid">
-                     <div class="mc-row"><div class="mc-row__key">Action</div><div class="mc-row__value">${run.action || "-"}</div></div>
-                     <div class="mc-row"><div class="mc-row__key">At</div><div class="mc-row__value">${this.formatRunTs(run.ts)}</div></div>
-                     <div class="mc-row"><div class="mc-row__key">Session</div><div class="mc-row__value">${run.sessionKey || "-"}</div></div>
-                     <div class="mc-row"><div class="mc-row__key">Summary</div><div class="mc-row__value">${run.summary || "-"}</div></div>
-                     <div class="mc-row"><div class="mc-row__key">Error</div><div class="mc-row__value">${run.error || "-"}</div></div>
-                   </div>
-                 </article>
-              `)
-              : html`<div class="card empty-state">No cron runs found.</div>`}
-
-            ${this.renderFormModal()}
-            ${this.renderDeleteConfirmDialog()}
-          </div>
-        </section>
-      </section>
-    `;
+    return this.renderWidgetDashboard();
   }
 }

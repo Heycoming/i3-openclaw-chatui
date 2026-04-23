@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "widgets": [
+    { "id": "cron-next-job", "type": "cron-next-job", "size": "small" },
+    { "id": "cron-latest-run", "type": "cron-latest-run", "size": "small" },
+    { "id": "cron-run-history", "type": "cron-run-history", "size": "medium" },
+    { "id": "cron-upcoming-timeline", "type": "cron-upcoming-timeline", "size": "large" },
+    { "id": "cron-job-list", "type": "cron-job-list", "size": "medium" }
+  ]
+}
