@@ -4,7 +4,6 @@ import {
   cloneLayout,
   createLayout,
   createWidgetId,
-  deleteDashboardLayout,
   loadDashboardLayout,
   saveDashboardLayout,
   type DashboardLayoutFile,
@@ -126,6 +125,7 @@ export class MissionControlView extends LitElement {
   @state() private layoutEditorOpen = false;
   @state() private layoutPaletteOpen = false;
   @state() private layoutSaving = false;
+  @state() private layoutDirty = false;
   @state() private layoutError = "";
   @state() private widgetLayout: DashboardLayoutFile = this.createDefaultLayout();
   @state() private tasks: MissionControlTask[] = [];
@@ -149,7 +149,7 @@ export class MissionControlView extends LitElement {
   @state() private dateFromTime = "";
   @state() private dateToTime = "";
   @state() private outcomeFilter: "all" | "success" | "failed" = "all";
-  @state() private selectedSessionId = "";
+  @state() private selectedSessionId = "all";
   @state() private sessionPickerSearch = "";
   @state() private subagentRuns: SubagentRunRecord[] = [];
   @state() private subagentSessions: SubagentSessionRecord[] = [];
@@ -188,13 +188,6 @@ export class MissionControlView extends LitElement {
       allowedSizes: ["medium", "large"],
     },
     {
-      type: "task-filters",
-      title: "Filters",
-      description: "The existing filter controls for task search",
-      defaultSize: "large",
-      allowedSizes: ["large"],
-    },
-    {
       type: "subagent-summary",
       title: "Subagent activity",
       description: "A quick view of runs and sessions tied to the current data",
@@ -203,7 +196,7 @@ export class MissionControlView extends LitElement {
     },
   ];
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
-  private layoutSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private layoutSnapshot: DashboardLayoutFile | null = null;
   private openDetails = new Set<string>();
 
   createRenderRoot() {
@@ -242,20 +235,15 @@ export class MissionControlView extends LitElement {
       clearInterval(this.refreshTimer);
       this.refreshTimer = null;
     }
-    if (this.layoutSaveTimer) {
-      clearTimeout(this.layoutSaveTimer);
-      this.layoutSaveTimer = null;
-    }
   }
 
   private createDefaultLayout() {
     return createLayout([
+      { id: "recent-tasks", type: "task-recent-list", size: "large" },
+      { id: "task-history", type: "task-history", size: "large" },
       { id: "task-summary", type: "task-summary", size: "small" },
       { id: "task-metrics", type: "task-metrics", size: "small" },
-      { id: "recent-tasks", type: "task-recent-list", size: "medium" },
-      { id: "task-history", type: "task-history", size: "large" },
-      { id: "task-filters", type: "task-filters", size: "large" },
-      { id: "subagent-activity", type: "subagent-summary", size: "medium" },
+      { id: "subagent-activity", type: "subagent-summary", size: "small" },
     ]);
   }
 
@@ -272,9 +260,32 @@ export class MissionControlView extends LitElement {
   }
 
   private getWidgetSpan(size: DashboardWidgetLayout["size"]) {
-    if (size === "large") return 12;
-    if (size === "medium") return 6;
-    return 4;
+    if (size === "large") return 3;
+    if (size === "medium") return 2;
+    return 1;
+  }
+
+  private reflowWidgetsInOrder(widgets: DashboardWidgetLayout[]) {
+    let row = 1;
+    let col = 1;
+
+    return widgets.map((widget) => {
+      const span = this.getWidgetSpan(widget.size);
+      if (col + span - 1 > 3) {
+        row += 1;
+        col = 1;
+      }
+
+      const placed = { ...widget, row, col };
+      col += span;
+
+      if (col > 3) {
+        row += 1;
+        col = 1;
+      }
+
+      return placed;
+    });
   }
 
   private async loadWidgetLayout() {
@@ -282,17 +293,6 @@ export class MissionControlView extends LitElement {
     if (saved) {
       this.widgetLayout = cloneLayout(saved);
     }
-  }
-
-  private scheduleLayoutSave() {
-    if (this.layoutSaveTimer) {
-      clearTimeout(this.layoutSaveTimer);
-    }
-
-    this.layoutSaveTimer = setTimeout(() => {
-      this.layoutSaveTimer = null;
-      void this.persistLayout();
-    }, 150);
   }
 
   private async persistLayout() {
@@ -308,28 +308,51 @@ export class MissionControlView extends LitElement {
     }
   }
 
-  private async resetLayout() {
+  private resetLayoutDraft() {
     this.widgetLayout = this.createDefaultLayout();
+    this.layoutDirty = true;
+  }
+
+  private async saveLayoutChanges() {
+    await this.persistLayout();
     this.layoutEditorOpen = false;
     this.layoutPaletteOpen = false;
+    this.layoutDirty = false;
+    this.layoutSnapshot = null;
+  }
 
-    try {
-      await deleteDashboardLayout(this.layoutPage);
-    } catch (error) {
-      this.layoutError = error instanceof Error ? error.message : String(error);
+  private discardLayoutChanges() {
+    if (this.layoutSnapshot) {
+      this.widgetLayout = cloneLayout(this.layoutSnapshot);
     }
+    this.layoutEditorOpen = false;
+    this.layoutPaletteOpen = false;
+    this.layoutDirty = false;
+    this.layoutSnapshot = null;
   }
 
   private toggleLayoutEditor() {
-    this.layoutEditorOpen = !this.layoutEditorOpen;
-    if (this.layoutEditorOpen && !this.widgetLayout.widgets.length) {
-      this.widgetLayout = this.createDefaultLayout();
+    if (!this.layoutEditorOpen) {
+      if (!this.widgetLayout.widgets.length) {
+        this.widgetLayout = this.createDefaultLayout();
+      }
+      this.layoutSnapshot = cloneLayout(this.widgetLayout);
+      this.layoutEditorOpen = true;
+      this.layoutPaletteOpen = false;
+      this.layoutDirty = false;
+      return;
     }
+
+    this.discardLayoutChanges();
   }
 
   private updateWidgetLayout(mutator: (widgets: DashboardWidgetLayout[]) => DashboardWidgetLayout[]) {
     this.widgetLayout = createLayout(mutator([...this.widgetLayout.widgets]));
-    this.scheduleLayoutSave();
+    if (this.layoutEditorOpen) {
+      this.layoutDirty = true;
+    } else {
+      void this.persistLayout();
+    }
   }
 
   private addWidget(type: string) {
@@ -338,7 +361,7 @@ export class MissionControlView extends LitElement {
 
     this.updateWidgetLayout((widgets) => [
       ...widgets,
-      { id: createWidgetId(type), type, size: definition.defaultSize },
+      { id: createWidgetId(type), type, size: definition.defaultSize, row: 1, col: 1 },
     ]);
   }
 
@@ -360,7 +383,7 @@ export class MissionControlView extends LitElement {
       const [widget] = next.splice(fromIndex, 1);
       const insertionIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
       next.splice(insertionIndex, 0, widget);
-      return next;
+      return this.reflowWidgetsInOrder(next);
     });
   }
 
@@ -378,6 +401,7 @@ export class MissionControlView extends LitElement {
 
   private onWidgetDrop(event: DragEvent, targetWidgetId: string) {
     event.preventDefault();
+    event.stopPropagation();
     const widgetId = event.dataTransfer?.getData("text/plain") || "";
     if (!widgetId || widgetId === targetWidgetId) return;
     this.moveWidget(widgetId, targetWidgetId);
@@ -385,6 +409,7 @@ export class MissionControlView extends LitElement {
 
   private onCanvasDrop(event: DragEvent) {
     event.preventDefault();
+    event.stopPropagation();
     const widgetId = event.dataTransfer?.getData("text/plain") || "";
     if (!widgetId) return;
 
@@ -394,8 +419,12 @@ export class MissionControlView extends LitElement {
 
     const [widget] = widgets.splice(fromIndex, 1);
     widgets.push(widget);
-    this.widgetLayout = createLayout(widgets);
-    this.scheduleLayoutSave();
+    this.widgetLayout = createLayout(this.reflowWidgetsInOrder(widgets));
+    if (this.layoutEditorOpen) {
+      this.layoutDirty = true;
+    } else {
+      void this.persistLayout();
+    }
   }
 
   private resolveApiOrigin() {
@@ -1043,15 +1072,19 @@ export class MissionControlView extends LitElement {
   }
 
   private renderTaskRecentListWidget(size: DashboardWidgetLayout["size"]) {
+    const grouped = this.getSessionGroupedTasks();
     const limit = size === "small" ? 3 : size === "medium" ? 5 : 8;
-    const tasks = this.getSortedTasks().slice(0, limit);
+    const tasks = grouped.slice(0, limit);
 
     if (!tasks.length) {
       return html`<div class="widget-empty">No recent tasks yet.</div>`;
     }
 
     return html`
-      <div class="widget-list">
+      <div class="widget-stack">
+        ${this.showFilters ? this.renderSessionTabs() : nothing}
+        ${this.showFilters ? this.renderFilterPanel() : nothing}
+        <div class="widget-list">
         ${tasks.map((task) => html`
           <article class="widget-list-item">
             <div class="widget-list-item__title-row">
@@ -1066,20 +1099,25 @@ export class MissionControlView extends LitElement {
             </div>
           </article>
         `)}
+        </div>
       </div>
     `;
   }
 
   private renderTaskHistoryWidget(size: DashboardWidgetLayout["size"]) {
+    const grouped = this.getSessionGroupedTasks();
     const limit = size === "medium" ? 4 : 6;
-    const tasks = this.getSortedTasks().slice(0, limit);
+    const tasks = grouped.slice(0, limit);
 
     if (!tasks.length) {
       return html`<div class="widget-empty">Task history is empty.</div>`;
     }
 
     return html`
-      <div class="widget-history">
+      <div class="widget-stack">
+        ${this.showFilters ? this.renderSessionTabs() : nothing}
+        ${this.showFilters ? this.renderFilterPanel() : nothing}
+        <div class="widget-history">
         ${tasks.map((task) => html`
           <article class="widget-history-item">
             <header class="widget-history-item__header">
@@ -1095,21 +1133,7 @@ export class MissionControlView extends LitElement {
             <p class="widget-preview">${task.title || task.prompt || task.description || "No description"}</p>
           </article>
         `)}
-      </div>
-    `;
-  }
-
-  private renderTaskFiltersWidget() {
-    return html`
-      <div class="widget-stack">
-        <div class="widget-row">
-          <span>Filters and pagination</span>
-          <button class="btn btn--ghost btn--sm" @click=${() => { this.showFilters = !this.showFilters; }}>
-            ${this.showFilters ? "Hide filters" : "Show filters"}
-          </button>
         </div>
-        ${this.renderFilterPanel()}
-        ${this.renderPagination()}
       </div>
     `;
   }
@@ -1148,8 +1172,6 @@ export class MissionControlView extends LitElement {
         return this.renderTaskRecentListWidget(widget.size);
       case "task-history":
         return this.renderTaskHistoryWidget(widget.size);
-      case "task-filters":
-        return this.renderTaskFiltersWidget();
       case "subagent-summary":
         return this.renderSubagentSummaryWidget(widget.size);
       default:
@@ -1159,43 +1181,66 @@ export class MissionControlView extends LitElement {
 
   private renderWidgetCard(widget: DashboardWidgetLayout) {
     const definition = this.getWidgetDefinition(widget.type);
-    const span = this.getWidgetSpan(widget.size);
+    const allowedSizes = definition?.allowedSizes ?? ["small", "medium", "large"];
+    const fallbackSize = definition?.defaultSize ?? "small";
+    const effectiveSize = allowedSizes.includes(widget.size)
+      ? widget.size
+      : (allowedSizes.includes(fallbackSize) ? fallbackSize : allowedSizes[0]);
+    const span = this.getWidgetSpan(effectiveSize);
+    const widgetForRender = effectiveSize === widget.size ? widget : { ...widget, size: effectiveSize };
+    const row = Math.floor(widget.row);
+    const col = Math.floor(widget.col);
+    const styleParts = [
+      `grid-column: ${col} / span ${span};`,
+      `grid-row: ${row};`,
+    ].filter(Boolean);
+    const showFilterToggle = !this.layoutEditorOpen && (widget.type === "task-recent-list" || widget.type === "task-history");
 
     return html`
       <article
-        class="dashboard-widget dashboard-widget--${widget.size} ${this.layoutEditorOpen ? "dashboard-widget--editing" : ""}"
-        style=${`grid-column: span ${span};`}
+        class="dashboard-widget dashboard-widget--${effectiveSize} ${this.layoutEditorOpen ? "dashboard-widget--editing" : ""}"
+        style=${styleParts.join(" ")}
         draggable=${this.layoutEditorOpen ? "true" : "false"}
         @dragstart=${(event: DragEvent) => this.onWidgetDragStart(event, widget.id)}
-        @dragover=${(event: DragEvent) => event.preventDefault()}
+        @dragover=${(event: DragEvent) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
         @drop=${(event: DragEvent) => this.onWidgetDrop(event, widget.id)}
       >
         <header class="dashboard-widget__header">
           <div class="dashboard-widget__title-group">
-            <span class="dashboard-widget__grip" title="Drag to reorder">⠿</span>
+            ${this.layoutEditorOpen ? html`<span class="dashboard-widget__grip" title="Drag to reorder">⠿</span>` : nothing}
             <div>
               <h3>${definition?.title ?? widget.type}</h3>
               ${definition?.description ? html`<p>${definition.description}</p>` : nothing}
             </div>
           </div>
 
-          ${this.layoutEditorOpen ? html`
+          ${(showFilterToggle || this.layoutEditorOpen) ? html`
             <div class="dashboard-widget__actions">
-              <select
-                class="field__select dashboard-widget__size-select"
-                .value=${widget.size}
-                @change=${(event: Event) => this.setWidgetSize(widget.id, (event.target as HTMLSelectElement).value as DashboardWidgetLayout["size"])}
-              >
-                ${(definition?.allowedSizes ?? ["small", "medium", "large"]).map((size) => html`<option value=${size}>${size}</option>`) }
-              </select>
-              <button class="btn btn--ghost btn--sm" @click=${() => this.removeWidget(widget.id)}>Remove</button>
+              ${showFilterToggle ? html`
+                <button class="btn btn--ghost btn--sm" @click=${() => { this.showFilters = !this.showFilters; }}>
+                  ${this.showFilters ? "Hide filter" : "Filter"}
+                </button>
+              ` : nothing}
+              ${this.layoutEditorOpen ? html`
+                <select
+                  class="field__select dashboard-widget__size-select"
+                  aria-label="Widget size"
+                  @change=${(event: Event) => this.setWidgetSize(widget.id, (event.target as HTMLSelectElement).value as DashboardWidgetLayout["size"])}
+                >
+                  ${allowedSizes.map((size) => html`<option value=${size} ?selected=${size === effectiveSize}>${size}</option>`) }
+                </select>
+                <button class="btn btn--ghost btn--sm" @click=${() => this.removeWidget(widget.id)}>Remove</button>
+              ` : nothing}
             </div>
           ` : nothing}
         </header>
 
         <div class="dashboard-widget__body">
           ${this.layoutEditorOpen ? html`<div class="dashboard-widget__drop-hint">Drop another widget here to reshuffle the layout.</div>` : nothing}
-          ${this.renderWidgetContent(widget)}
+          ${this.renderWidgetContent(widgetForRender)}
         </div>
       </article>
     `;
@@ -1206,17 +1251,26 @@ export class MissionControlView extends LitElement {
       <div class="dashboard-toolbar">
         <div class="dashboard-toolbar__meta">
           <span class="badge badge--warn">Editable layout</span>
-          <span>${this.layoutSaving ? "Saving layout..." : "Saved layout is read on every visit"}</span>
+          <span>
+            ${this.layoutSaving
+              ? "Saving layout..."
+              : this.layoutDirty
+                ? "Unsaved layout changes"
+                : "No unsaved changes"}
+          </span>
         </div>
         <div class="dashboard-toolbar__actions">
           <button class="btn btn--ghost btn--sm" @click=${() => { this.layoutPaletteOpen = !this.layoutPaletteOpen; }}>
             ${this.layoutPaletteOpen ? "Close widget picker" : "Add widget"}
           </button>
-          <button class="btn btn--ghost btn--sm" @click=${() => void this.resetLayout()}>
-            Reset layout
+          <button class="btn btn--ghost btn--sm" @click=${() => this.resetLayoutDraft()}>
+            Reset draft
           </button>
-          <button class="btn btn--primary btn--sm" @click=${() => { this.layoutEditorOpen = false; }}>
-            Done editing
+          <button class="btn btn--ghost btn--sm" @click=${() => this.discardLayoutChanges()}>
+            Not save
+          </button>
+          <button class="btn btn--primary btn--sm" @click=${() => void this.saveLayoutChanges()}>
+            Save
           </button>
         </div>
       </div>
@@ -1243,8 +1297,8 @@ export class MissionControlView extends LitElement {
       <section class="content mission-control mission-control--widgets">
         <header class="content__header mission-control__header">
           <div>
-            <h1 class="content__title">Mission Control Widgets</h1>
-            <p class="mission-control__meta">Drag widgets around, change sizes, and save a custom layout for this dashboard.</p>
+            <h1 class="content__title">Mission Control Logs</h1>
+            <p class="mission-control__meta">SQLite task traces with events and documents. Use Edit layout to rearrange widgets.</p>
           </div>
           <div class="content__actions">
             <button class="btn btn--ghost btn--sm" @click=${() => void this.refresh()}>
@@ -1269,7 +1323,14 @@ export class MissionControlView extends LitElement {
         ${this.layoutEditorOpen ? this.renderWidgetEditorToolbar() : nothing}
         ${this.layoutEditorOpen ? this.renderWidgetPalette() : nothing}
 
-        <section class="dashboard-grid" @dragover=${(event: DragEvent) => event.preventDefault()} @drop=${(event: DragEvent) => this.onCanvasDrop(event)}>
+        <section
+          class="dashboard-grid"
+          @dragover=${(event: DragEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          @drop=${(event: DragEvent) => this.onCanvasDrop(event)}
+        >
           ${this.widgetLayout.widgets.map((widget) => this.renderWidgetCard(widget))}
         </section>
       </section>
@@ -1668,24 +1729,50 @@ export class MissionControlView extends LitElement {
   private syncSelectedSession() {
     const groups = this.getSessionGroups();
     if (!groups.length) {
-      this.selectedSessionId = "";
+      this.selectedSessionId = "all";
       return;
     }
 
+    if (this.selectedSessionId === "all") return;
+
     const hasCurrent = groups.some((group) => group.sessionId === this.selectedSessionId);
     if (!this.selectedSessionId || !hasCurrent) {
-      this.selectedSessionId = groups[0].sessionId;
+      this.selectedSessionId = "all";
     }
+  }
+
+  private getSessionGroupedTasks() {
+    const all = this.getSortedTasks();
+    if (this.selectedSessionId === "all") return all;
+    return all.filter((task) => (task.sessionId || "") === this.selectedSessionId);
   }
 
   private renderSessionTabs() {
     const groups = this.getSessionGroups();
-    if (!groups.length) return nothing;
+    if (!groups.length) return html`
+      <section class="card" style="padding: 10px 12px;">
+        <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+          <span style="font-weight: 500; color: var(--text-secondary, #666);">Sessions:</span>
+          <button
+            class="btn btn--ghost btn--sm mc-filter-preset--active"
+            @click=${() => { this.selectedSessionId = "all"; }}
+          >
+            All
+          </button>
+        </div>
+      </section>
+    `;
 
     return html`
       <section class="card" style="padding: 10px 12px;">
         <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
           <span style="font-weight: 500; color: var(--text-secondary, #666);">Sessions:</span>
+          <button
+            class="btn btn--ghost btn--sm ${this.selectedSessionId === "all" ? "mc-filter-preset--active" : ""}"
+            @click=${() => { this.selectedSessionId = "all"; }}
+          >
+            All
+          </button>
           ${groups.map((group) => html`
             <button
               class="btn btn--ghost btn--sm ${this.selectedSessionId === group.sessionId ? "mc-filter-preset--active" : ""}"
@@ -1701,48 +1788,6 @@ export class MissionControlView extends LitElement {
   }
 
   render() {
-    const sessionGroups = this.getSessionGroups();
-    const selectedGroup = sessionGroups.find((group) => group.sessionId === this.selectedSessionId);
-    const visibleTasks = selectedGroup ? selectedGroup.tasks : this.tasks;
-
-    return html`
-      <section class="content mission-control">
-        <header class="content__header mission-control__header">
-          <div>
-            <h1 class="content__title">Mission Control Logs</h1>
-            <p class="mission-control__meta">SQLite task traces with events and documents.</p>
-          </div>
-          <div class="content__actions">
-            <button class="btn btn--ghost btn--sm" @click=${() => { this.showFilters = !this.showFilters; }}>
-              ${this.showFilters ? "Hide Filters" : "Filters"}
-            </button>
-            <button class="btn btn--ghost btn--sm" @click=${() => void this.refresh()}>
-              ${this.loading ? "Refreshing..." : "Refresh"}
-            </button>
-          </div>
-        </header>
-
-        <div class="mission-control__pills">
-          <span class="badge">DB: ${this.dbPath}</span>
-          <span class="badge">Updated: ${this.generatedAt ? this.formatDate(this.generatedAt) : "-"}</span>
-          <span class="badge">Auto refresh: 3s</span>
-          <span class="badge">Tasks on page: ${this.tasks.length}</span>
-        </div>
-
-        ${this.renderFilterPanel()}
-
-        ${this.renderSessionTabs()}
-
-        ${this.error ? html`<div class="callout callout--danger">${this.error}</div>` : nothing}
-
-        <div class="mission-control__list">
-          ${visibleTasks.length
-            ? visibleTasks.map((task) => this.renderTask(task))
-            : html`<div class="card empty-state">${this.loading ? "Loading logs..." : "No task logs yet"}</div>`}
-        </div>
-
-        ${this.renderPagination()}
-      </section>
-    `;
+    return this.renderWidgetDashboard();
   }
 }

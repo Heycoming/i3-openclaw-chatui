@@ -1,10 +1,40 @@
 {
   "version": 1,
   "widgets": [
-    { "id": "task-summary", "type": "task-summary", "size": "small" },
-    { "id": "task-metrics", "type": "task-metrics", "size": "small" },
-    { "id": "recent-tasks", "type": "task-recent-list", "size": "medium" },
-    { "id": "task-history", "type": "task-history", "size": "large" },
-    { "id": "subagent-activity", "type": "subagent-summary", "size": "medium" }
+    {
+      "id": "recent-tasks",
+      "type": "task-recent-list",
+      "size": "large",
+      "row": 1,
+      "col": 1
+    },
+    {
+      "id": "task-history",
+      "type": "task-history",
+      "size": "large",
+      "row": 2,
+      "col": 1
+    },
+    {
+      "id": "task-summary",
+      "type": "task-summary",
+      "size": "small",
+      "row": 3,
+      "col": 1
+    },
+    {
+      "id": "task-metrics",
+      "type": "task-metrics",
+      "size": "small",
+      "row": 3,
+      "col": 2
+    },
+    {
+      "id": "subagent-activity",
+      "type": "subagent-summary",
+      "size": "small",
+      "row": 3,
+      "col": 3
+    }
   ]
 }

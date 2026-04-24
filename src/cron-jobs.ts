@@ -4,7 +4,6 @@ import {
   cloneLayout,
   createLayout,
   createWidgetId,
-  deleteDashboardLayout,
   loadDashboardLayout,
   saveDashboardLayout,
   type DashboardLayoutFile,
@@ -50,6 +49,7 @@ export class CronJobsView extends LitElement {
   @state() private layoutEditorOpen = false;
   @state() private layoutPaletteOpen = false;
   @state() private layoutSaving = false;
+  @state() private layoutDirty = false;
   @state() private layoutError = "";
   @state() private widgetLayout: DashboardLayoutFile = this.createDefaultLayout();
   @state() private error = "";
@@ -137,7 +137,7 @@ export class CronJobsView extends LitElement {
   ];
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private clockTimer: ReturnType<typeof setInterval> | null = null;
-  private layoutSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private layoutSnapshot: DashboardLayoutFile | null = null;
 
   createRenderRoot() {
     return this;
@@ -166,21 +166,40 @@ export class CronJobsView extends LitElement {
       clearInterval(this.clockTimer);
       this.clockTimer = null;
     }
-    if (this.layoutSaveTimer) {
-      clearTimeout(this.layoutSaveTimer);
-      this.layoutSaveTimer = null;
-    }
   }
 
   private createDefaultLayout() {
     return createLayout([
+      { id: "cron-upcoming-timeline", type: "cron-upcoming-timeline", size: "large" },
+      { id: "cron-summary", type: "cron-summary", size: "small" },
       { id: "cron-next-job", type: "cron-next-job", size: "small" },
       { id: "cron-latest-run", type: "cron-latest-run", size: "small" },
-      { id: "cron-summary", type: "cron-summary", size: "small" },
-      { id: "cron-run-history", type: "cron-run-history", size: "medium" },
-      { id: "cron-upcoming-timeline", type: "cron-upcoming-timeline", size: "large" },
       { id: "cron-job-list", type: "cron-job-list", size: "large" },
+      { id: "cron-run-history", type: "cron-run-history", size: "large" },
     ]);
+  }
+
+  private reflowWidgetsInOrder(widgets: DashboardWidgetLayout[]) {
+    let row = 1;
+    let col = 1;
+
+    return widgets.map((widget) => {
+      const span = this.getWidgetSpan(widget.size);
+      if (col + span - 1 > 3) {
+        row += 1;
+        col = 1;
+      }
+
+      const placed = { ...widget, row, col };
+      col += span;
+
+      if (col > 3) {
+        row += 1;
+        col = 1;
+      }
+
+      return placed;
+    });
   }
 
   private getWidgetDefinition(type: string) {
@@ -188,9 +207,9 @@ export class CronJobsView extends LitElement {
   }
 
   private getWidgetSpan(size: DashboardWidgetLayout["size"]) {
-    if (size === "large") return 12;
-    if (size === "medium") return 6;
-    return 4;
+    if (size === "large") return 3;
+    if (size === "medium") return 2;
+    return 1;
   }
 
   private async loadWidgetLayout() {
@@ -198,17 +217,6 @@ export class CronJobsView extends LitElement {
     if (saved) {
       this.widgetLayout = cloneLayout(saved);
     }
-  }
-
-  private scheduleLayoutSave() {
-    if (this.layoutSaveTimer) {
-      clearTimeout(this.layoutSaveTimer);
-    }
-
-    this.layoutSaveTimer = setTimeout(() => {
-      this.layoutSaveTimer = null;
-      void this.persistLayout();
-    }, 150);
   }
 
   private async persistLayout() {
@@ -224,28 +232,51 @@ export class CronJobsView extends LitElement {
     }
   }
 
-  private async resetLayout() {
+  private resetLayoutDraft() {
     this.widgetLayout = this.createDefaultLayout();
+    this.layoutDirty = true;
+  }
+
+  private async saveLayoutChanges() {
+    await this.persistLayout();
     this.layoutEditorOpen = false;
     this.layoutPaletteOpen = false;
+    this.layoutDirty = false;
+    this.layoutSnapshot = null;
+  }
 
-    try {
-      await deleteDashboardLayout(this.layoutPage);
-    } catch (error) {
-      this.layoutError = error instanceof Error ? error.message : String(error);
+  private discardLayoutChanges() {
+    if (this.layoutSnapshot) {
+      this.widgetLayout = cloneLayout(this.layoutSnapshot);
     }
+    this.layoutEditorOpen = false;
+    this.layoutPaletteOpen = false;
+    this.layoutDirty = false;
+    this.layoutSnapshot = null;
   }
 
   private toggleLayoutEditor() {
-    this.layoutEditorOpen = !this.layoutEditorOpen;
-    if (this.layoutEditorOpen && !this.widgetLayout.widgets.length) {
-      this.widgetLayout = this.createDefaultLayout();
+    if (!this.layoutEditorOpen) {
+      if (!this.widgetLayout.widgets.length) {
+        this.widgetLayout = this.createDefaultLayout();
+      }
+      this.layoutSnapshot = cloneLayout(this.widgetLayout);
+      this.layoutEditorOpen = true;
+      this.layoutPaletteOpen = false;
+      this.layoutDirty = false;
+      return;
     }
+
+    this.discardLayoutChanges();
   }
 
   private updateWidgetLayout(mutator: (widgets: DashboardWidgetLayout[]) => DashboardWidgetLayout[]) {
     this.widgetLayout = createLayout(mutator([...this.widgetLayout.widgets]));
-    this.scheduleLayoutSave();
+    if (this.layoutEditorOpen) {
+      this.layoutDirty = true;
+    } else {
+      void this.persistLayout();
+    }
   }
 
   private addWidget(type: string) {
@@ -254,7 +285,7 @@ export class CronJobsView extends LitElement {
 
     this.updateWidgetLayout((widgets) => [
       ...widgets,
-      { id: createWidgetId(type), type, size: definition.defaultSize },
+      { id: createWidgetId(type), type, size: definition.defaultSize, row: 1, col: 1 },
     ]);
   }
 
@@ -276,7 +307,7 @@ export class CronJobsView extends LitElement {
       const [widget] = next.splice(fromIndex, 1);
       const insertionIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
       next.splice(insertionIndex, 0, widget);
-      return next;
+      return this.reflowWidgetsInOrder(next);
     });
   }
 
@@ -294,6 +325,7 @@ export class CronJobsView extends LitElement {
 
   private onWidgetDrop(event: DragEvent, targetWidgetId: string) {
     event.preventDefault();
+    event.stopPropagation();
     const widgetId = event.dataTransfer?.getData("text/plain") || "";
     if (!widgetId || widgetId === targetWidgetId) return;
     this.moveWidget(widgetId, targetWidgetId);
@@ -301,6 +333,7 @@ export class CronJobsView extends LitElement {
 
   private onCanvasDrop(event: DragEvent) {
     event.preventDefault();
+    event.stopPropagation();
     const widgetId = event.dataTransfer?.getData("text/plain") || "";
     if (!widgetId) return;
 
@@ -310,8 +343,12 @@ export class CronJobsView extends LitElement {
 
     const [widget] = widgets.splice(fromIndex, 1);
     widgets.push(widget);
-    this.widgetLayout = createLayout(widgets);
-    this.scheduleLayoutSave();
+    this.widgetLayout = createLayout(this.reflowWidgetsInOrder(widgets));
+    if (this.layoutEditorOpen) {
+      this.layoutDirty = true;
+    } else {
+      void this.persistLayout();
+    }
   }
 
   private resolveApiOrigin() {
@@ -744,20 +781,35 @@ export class CronJobsView extends LitElement {
 
   private renderWidgetCard(widget: DashboardWidgetLayout) {
     const definition = this.getWidgetDefinition(widget.type);
-    const span = this.getWidgetSpan(widget.size);
+    const allowedSizes = definition?.allowedSizes ?? ["small", "medium", "large"];
+    const fallbackSize = definition?.defaultSize ?? "small";
+    const effectiveSize = allowedSizes.includes(widget.size)
+      ? widget.size
+      : (allowedSizes.includes(fallbackSize) ? fallbackSize : allowedSizes[0]);
+    const span = this.getWidgetSpan(effectiveSize);
+    const widgetForRender = effectiveSize === widget.size ? widget : { ...widget, size: effectiveSize };
+    const row = Math.floor(widget.row);
+    const col = Math.floor(widget.col);
+    const styleParts = [
+      `grid-column: ${col} / span ${span};`,
+      `grid-row: ${row};`,
+    ].filter(Boolean);
 
     return html`
       <article
-        class="dashboard-widget dashboard-widget--${widget.size} ${this.layoutEditorOpen ? "dashboard-widget--editing" : ""}"
-        style=${`grid-column: span ${span};`}
+        class="dashboard-widget dashboard-widget--${effectiveSize} ${this.layoutEditorOpen ? "dashboard-widget--editing" : ""}"
+        style=${styleParts.join(" ")}
         draggable=${this.layoutEditorOpen ? "true" : "false"}
         @dragstart=${(event: DragEvent) => this.onWidgetDragStart(event, widget.id)}
-        @dragover=${(event: DragEvent) => event.preventDefault()}
+        @dragover=${(event: DragEvent) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
         @drop=${(event: DragEvent) => this.onWidgetDrop(event, widget.id)}
       >
         <header class="dashboard-widget__header">
           <div class="dashboard-widget__title-group">
-            <span class="dashboard-widget__grip" title="Drag to reorder">⠿</span>
+            ${this.layoutEditorOpen ? html`<span class="dashboard-widget__grip" title="Drag to reorder">⠿</span>` : nothing}
             <div>
               <h3>${definition?.title ?? widget.type}</h3>
               ${definition?.description ? html`<p>${definition.description}</p>` : nothing}
@@ -768,10 +820,10 @@ export class CronJobsView extends LitElement {
             <div class="dashboard-widget__actions">
               <select
                 class="field__select dashboard-widget__size-select"
-                .value=${widget.size}
+                aria-label="Widget size"
                 @change=${(event: Event) => this.setWidgetSize(widget.id, (event.target as HTMLSelectElement).value as DashboardWidgetLayout["size"])}
               >
-                ${(definition?.allowedSizes ?? ["small", "medium", "large"]).map((size) => html`<option value=${size}>${size}</option>`) }
+                ${allowedSizes.map((size) => html`<option value=${size} ?selected=${size === effectiveSize}>${size}</option>`) }
               </select>
               <button class="btn btn--ghost btn--sm" @click=${() => this.removeWidget(widget.id)}>Remove</button>
             </div>
@@ -780,7 +832,7 @@ export class CronJobsView extends LitElement {
 
         <div class="dashboard-widget__body">
           ${this.layoutEditorOpen ? html`<div class="dashboard-widget__drop-hint">Drop another widget here to reshuffle the layout.</div>` : nothing}
-          ${this.renderWidgetContent(widget)}
+          ${this.renderWidgetContent(widgetForRender)}
         </div>
       </article>
     `;
@@ -791,17 +843,26 @@ export class CronJobsView extends LitElement {
       <div class="dashboard-toolbar">
         <div class="dashboard-toolbar__meta">
           <span class="badge badge--warn">Editable layout</span>
-          <span>${this.layoutSaving ? "Saving layout..." : "Saved layout is read on every visit"}</span>
+          <span>
+            ${this.layoutSaving
+              ? "Saving layout..."
+              : this.layoutDirty
+                ? "Unsaved layout changes"
+                : "No unsaved changes"}
+          </span>
         </div>
         <div class="dashboard-toolbar__actions">
           <button class="btn btn--ghost btn--sm" @click=${() => { this.layoutPaletteOpen = !this.layoutPaletteOpen; }}>
             ${this.layoutPaletteOpen ? "Close widget picker" : "Add widget"}
           </button>
-          <button class="btn btn--ghost btn--sm" @click=${() => void this.resetLayout()}>
-            Reset layout
+          <button class="btn btn--ghost btn--sm" @click=${() => this.resetLayoutDraft()}>
+            Reset draft
           </button>
-          <button class="btn btn--primary btn--sm" @click=${() => { this.layoutEditorOpen = false; }}>
-            Done editing
+          <button class="btn btn--ghost btn--sm" @click=${() => this.discardLayoutChanges()}>
+            Not save
+          </button>
+          <button class="btn btn--primary btn--sm" @click=${() => void this.saveLayoutChanges()}>
+            Save
           </button>
         </div>
       </div>
@@ -828,8 +889,8 @@ export class CronJobsView extends LitElement {
       <section class="content mission-control mission-control--widgets">
         <header class="content__header mission-control__header">
           <div>
-            <h1 class="content__title">Cron Widgets</h1>
-            <p class="mission-control__meta">Drag widgets around, change sizes, and save a custom layout for the cron dashboard.</p>
+            <h1 class="content__title">Cron Jobs</h1>
+            <p class="mission-control__meta">Manage cron jobs and view their run history.</p>
           </div>
           <div class="content__actions">
             <button class="btn btn--ghost btn--sm" @click=${() => void this.refresh()}>
@@ -849,7 +910,14 @@ export class CronJobsView extends LitElement {
         ${this.layoutEditorOpen ? this.renderWidgetEditorToolbar() : nothing}
         ${this.layoutEditorOpen ? this.renderWidgetPalette() : nothing}
 
-        <section class="dashboard-grid" @dragover=${(event: DragEvent) => event.preventDefault()} @drop=${(event: DragEvent) => this.onCanvasDrop(event)}>
+        <section
+          class="dashboard-grid"
+          @dragover=${(event: DragEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          @drop=${(event: DragEvent) => this.onCanvasDrop(event)}
+        >
           ${this.widgetLayout.widgets.map((widget) => this.renderWidgetCard(widget))}
         </section>
 

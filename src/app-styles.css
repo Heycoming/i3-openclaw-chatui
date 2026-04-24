@@ -1459,7 +1459,8 @@ html, body {
 
 .dashboard-grid {
   display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-flow: row dense;
   gap: 14px;
   align-items: start;
 }
@@ -1529,6 +1530,8 @@ html, body {
 
 .dashboard-widget__body {
   padding: 14px;
+  max-height: 460px;
+  overflow: auto;
 }
 
 .dashboard-widget__drop-hint {
