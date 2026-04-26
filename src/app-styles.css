@@ -1472,11 +1472,13 @@ html, body {
   background: var(--panel);
   box-shadow: var(--shadow-sm);
   overflow: hidden;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
 .dashboard-widget--editing {
   border-style: dashed;
   box-shadow: 0 0 0 1px rgba(139, 124, 246, 0.08), var(--shadow-sm);
+  touch-action: manipulation;
 }
 
 .dashboard-widget__header {
@@ -1515,6 +1517,20 @@ html, body {
   cursor: grab;
   user-select: none;
   padding-top: 1px;
+  touch-action: pan-y;
+}
+
+.dashboard-widget--lifted {
+  transform: translateY(-4px) scale(1.01);
+  box-shadow: 0 22px 42px rgba(15, 23, 42, 0.22), 0 8px 20px rgba(15, 23, 42, 0.12);
+  border-color: rgba(84, 160, 255, 0.45);
+  z-index: 3;
+  position: relative;
+}
+
+.dashboard-widget--drop-target {
+  border-color: rgba(84, 160, 255, 0.55);
+  box-shadow: 0 0 0 2px rgba(84, 160, 255, 0.2), var(--shadow-sm);
 }
 
 .dashboard-widget__actions {

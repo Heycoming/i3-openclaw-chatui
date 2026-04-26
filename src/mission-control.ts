@@ -127,6 +127,7 @@ export class MissionControlView extends LitElement {
   @state() private layoutSaving = false;
   @state() private layoutDirty = false;
   @state() private layoutError = "";
+  @state() private isMobileLayout = this.getIsMobileViewport();
   @state() private widgetLayout: DashboardLayoutFile = this.createDefaultLayout();
   @state() private tasks: MissionControlTask[] = [];
   @state() private dbPath = "-";
@@ -196,8 +197,23 @@ export class MissionControlView extends LitElement {
     },
   ];
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private viewportResizeHandler: (() => void) | null = null;
   private layoutSnapshot: DashboardLayoutFile | null = null;
   private openDetails = new Set<string>();
+  @state() private activeDragWidgetId = "";
+  @state() private mobileDropTargetWidgetId = "";
+  private mobileLongPressTimer: ReturnType<typeof setTimeout> | null = null;
+  private mobilePointerStartX = 0;
+  private mobilePointerStartY = 0;
+  private mobilePointerClientX = 0;
+  private mobilePointerClientY = 0;
+  private mobileDragActive = false;
+  private mobileAutoScrollRaf: number | null = null;
+  private mobileAutoScrollVelocity = 0;
+  private mobilePrevBodyOverflow = "";
+  private mobilePrevBodyTouchAction = "";
+  private mobilePrevHtmlOverscrollBehavior = "";
+  private mobileScrollBlocker: ((event: Event) => void) | null = null;
 
   createRenderRoot() {
     return this;
@@ -205,9 +221,20 @@ export class MissionControlView extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    this.isMobileLayout = this.getIsMobileViewport();
     this.initializeDefaultTimes();
     void this.refresh();
     void this.loadWidgetLayout();
+    this.viewportResizeHandler = () => {
+      const nextIsMobile = this.getIsMobileViewport();
+      if (nextIsMobile === this.isMobileLayout) return;
+      this.isMobileLayout = nextIsMobile;
+      this.layoutEditorOpen = false;
+      this.layoutPaletteOpen = false;
+      this.layoutDirty = false;
+      void this.loadWidgetLayout();
+    };
+    window.addEventListener("resize", this.viewportResizeHandler, { passive: true });
     this.refreshTimer = setInterval(() => {
       void this.refresh();
     }, 3000);
@@ -231,20 +258,83 @@ export class MissionControlView extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback();
+    this.clearMobileLongPress();
+    this.stopMobileAutoScroll();
+    this.setMobileDragScrollLock(false);
+    if (this.viewportResizeHandler) {
+      window.removeEventListener("resize", this.viewportResizeHandler);
+      this.viewportResizeHandler = null;
+    }
     if (this.refreshTimer) {
       clearInterval(this.refreshTimer);
       this.refreshTimer = null;
     }
   }
 
-  private createDefaultLayout() {
+  private getIsMobileViewport() {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia("(max-width: 768px)").matches;
+  }
+
+  private getMobileLayoutStorageKey() {
+    return `openclaw:dashboard-layout:${this.layoutPage}:mobile`;
+  }
+
+  private readMobileLayoutFromStorage() {
+    if (typeof window === "undefined" || !window.localStorage) return null;
+    try {
+      const raw = window.localStorage.getItem(this.getMobileLayoutStorageKey());
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as DashboardLayoutFile;
+      if (!parsed || !Array.isArray(parsed.widgets)) return null;
+      return createLayout(parsed.widgets);
+    } catch {
+      return null;
+    }
+  }
+
+  private writeMobileLayoutToStorage(layout: DashboardLayoutFile) {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    try {
+      window.localStorage.setItem(this.getMobileLayoutStorageKey(), JSON.stringify(layout));
+    } catch {
+      // Best effort only.
+    }
+  }
+
+  private toMobileLayout(widgets: DashboardWidgetLayout[]) {
+    return createLayout(
+      widgets.map<DashboardWidgetLayout>((widget, index) => ({
+        ...widget,
+        size: "small",
+        row: index + 1,
+        col: 1,
+      })),
+    );
+  }
+
+  private createDesktopDefaultLayout() {
     return createLayout([
+      { id: "task-metrics", type: "task-metrics", size: "small" },
+      { id: "task-summary", type: "task-summary", size: "small" },
+      { id: "subagent-activity", type: "subagent-summary", size: "small" },
       { id: "recent-tasks", type: "task-recent-list", size: "large" },
       { id: "task-history", type: "task-history", size: "large" },
-      { id: "task-summary", type: "task-summary", size: "small" },
-      { id: "task-metrics", type: "task-metrics", size: "small" },
-      { id: "subagent-activity", type: "subagent-summary", size: "small" },
     ]);
+  }
+
+  private createMobileDefaultLayout() {
+    return createLayout([
+      { id: "task-metrics", type: "task-metrics", size: "small", row: 1, col: 1 },
+      { id: "task-summary", type: "task-summary", size: "small", row: 2, col: 1 },
+      { id: "subagent-activity", type: "subagent-summary", size: "small", row: 3, col: 1 },
+      { id: "recent-tasks", type: "task-recent-list", size: "small", row: 4, col: 1 },
+      { id: "task-history", type: "task-history", size: "small", row: 5, col: 1 },
+    ]);
+  }
+
+  private createDefaultLayout() {
+    return this.isMobileLayout ? this.createMobileDefaultLayout() : this.createDesktopDefaultLayout();
   }
 
   private getWidgetDefinition(type: string) {
@@ -265,7 +355,16 @@ export class MissionControlView extends LitElement {
     return 1;
   }
 
-  private reflowWidgetsInOrder(widgets: DashboardWidgetLayout[]) {
+  private reflowWidgetsInOrder(widgets: DashboardWidgetLayout[]): DashboardWidgetLayout[] {
+    if (this.isMobileLayout) {
+      return widgets.map<DashboardWidgetLayout>((widget, index) => ({
+        ...widget,
+        size: "small",
+        row: index + 1,
+        col: 1,
+      }));
+    }
+
     let row = 1;
     let col = 1;
 
@@ -289,10 +388,30 @@ export class MissionControlView extends LitElement {
   }
 
   private async loadWidgetLayout() {
+    if (this.isMobileLayout) {
+      const mobileSaved = this.readMobileLayoutFromStorage();
+      if (mobileSaved) {
+        this.widgetLayout = this.toMobileLayout(mobileSaved.widgets);
+        return;
+      }
+
+      const desktopSaved = await loadDashboardLayout(this.layoutPage);
+      if (desktopSaved) {
+        this.widgetLayout = this.toMobileLayout(desktopSaved.widgets);
+        return;
+      }
+
+      this.widgetLayout = this.createMobileDefaultLayout();
+      return;
+    }
+
     const saved = await loadDashboardLayout(this.layoutPage);
     if (saved) {
       this.widgetLayout = cloneLayout(saved);
+      return;
     }
+
+    this.widgetLayout = this.createDesktopDefaultLayout();
   }
 
   private async persistLayout() {
@@ -300,6 +419,10 @@ export class MissionControlView extends LitElement {
     this.layoutError = "";
 
     try {
+      if (this.isMobileLayout) {
+        this.writeMobileLayoutToStorage(this.toMobileLayout(this.widgetLayout.widgets));
+        return;
+      }
       await saveDashboardLayout(this.layoutPage, this.widgetLayout);
     } catch (error) {
       this.layoutError = error instanceof Error ? error.message : String(error);
@@ -347,7 +470,8 @@ export class MissionControlView extends LitElement {
   }
 
   private updateWidgetLayout(mutator: (widgets: DashboardWidgetLayout[]) => DashboardWidgetLayout[]) {
-    this.widgetLayout = createLayout(mutator([...this.widgetLayout.widgets]));
+    const nextLayout = createLayout(mutator([...this.widgetLayout.widgets]));
+    this.widgetLayout = this.isMobileLayout ? this.toMobileLayout(nextLayout.widgets) : nextLayout;
     if (this.layoutEditorOpen) {
       this.layoutDirty = true;
     } else {
@@ -361,7 +485,7 @@ export class MissionControlView extends LitElement {
 
     this.updateWidgetLayout((widgets) => [
       ...widgets,
-      { id: createWidgetId(type), type, size: definition.defaultSize, row: 1, col: 1 },
+      { id: createWidgetId(type), type, size: this.isMobileLayout ? "small" : definition.defaultSize, row: 1, col: 1 },
     ]);
   }
 
@@ -370,6 +494,7 @@ export class MissionControlView extends LitElement {
   }
 
   private setWidgetSize(widgetId: string, size: DashboardWidgetLayout["size"]) {
+    if (this.isMobileLayout) return;
     this.updateWidgetLayout((widgets) => widgets.map((widget) => (widget.id === widgetId ? { ...widget, size } : widget)));
   }
 
@@ -380,15 +505,13 @@ export class MissionControlView extends LitElement {
       if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return widgets;
 
       const next = [...widgets];
-      const [widget] = next.splice(fromIndex, 1);
-      const insertionIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
-      next.splice(insertionIndex, 0, widget);
+      [next[fromIndex], next[toIndex]] = [next[toIndex], next[fromIndex]];
       return this.reflowWidgetsInOrder(next);
     });
   }
 
   private onWidgetDragStart(event: DragEvent, widgetId: string) {
-    if (!this.layoutEditorOpen) {
+    if (!this.layoutEditorOpen || this.isMobileLayout) {
       event.preventDefault();
       return;
     }
@@ -397,12 +520,21 @@ export class MissionControlView extends LitElement {
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = "move";
     }
+    this.activeDragWidgetId = widgetId;
+    this.mobileDropTargetWidgetId = "";
+  }
+
+  private onWidgetDragEnd() {
+    this.activeDragWidgetId = "";
+    this.mobileDropTargetWidgetId = "";
   }
 
   private onWidgetDrop(event: DragEvent, targetWidgetId: string) {
     event.preventDefault();
     event.stopPropagation();
     const widgetId = event.dataTransfer?.getData("text/plain") || "";
+    this.activeDragWidgetId = "";
+    this.mobileDropTargetWidgetId = "";
     if (!widgetId || widgetId === targetWidgetId) return;
     this.moveWidget(widgetId, targetWidgetId);
   }
@@ -411,6 +543,8 @@ export class MissionControlView extends LitElement {
     event.preventDefault();
     event.stopPropagation();
     const widgetId = event.dataTransfer?.getData("text/plain") || "";
+    this.activeDragWidgetId = "";
+    this.mobileDropTargetWidgetId = "";
     if (!widgetId) return;
 
     const widgets = [...this.widgetLayout.widgets];
@@ -425,6 +559,173 @@ export class MissionControlView extends LitElement {
     } else {
       void this.persistLayout();
     }
+  }
+
+  private clearMobileLongPress() {
+    if (this.mobileLongPressTimer) {
+      clearTimeout(this.mobileLongPressTimer);
+      this.mobileLongPressTimer = null;
+    }
+  }
+
+  private setMobileDragScrollLock(locked: boolean) {
+    if (typeof document === "undefined") return;
+    if (locked) {
+      this.mobilePrevBodyTouchAction = document.body.style.touchAction;
+      this.mobilePrevHtmlOverscrollBehavior = document.documentElement.style.overscrollBehavior;
+      document.body.style.touchAction = "none";
+      document.documentElement.style.overscrollBehavior = "none";
+
+      if (!this.mobileScrollBlocker) {
+        this.mobileScrollBlocker = (event: Event) => {
+          if (!this.mobileDragActive) return;
+          if ((event as { cancelable?: boolean }).cancelable) {
+            event.preventDefault();
+          }
+        };
+      }
+      document.addEventListener("touchmove", this.mobileScrollBlocker, { passive: false });
+      document.addEventListener("wheel", this.mobileScrollBlocker, { passive: false });
+      return;
+    }
+
+    if (this.mobileScrollBlocker) {
+      document.removeEventListener("touchmove", this.mobileScrollBlocker);
+      document.removeEventListener("wheel", this.mobileScrollBlocker);
+    }
+    document.body.style.touchAction = this.mobilePrevBodyTouchAction;
+    document.documentElement.style.overscrollBehavior = this.mobilePrevHtmlOverscrollBehavior;
+    this.mobilePrevBodyTouchAction = "";
+    this.mobilePrevHtmlOverscrollBehavior = "";
+  }
+
+  private stopMobileAutoScroll() {
+    if (this.mobileAutoScrollRaf !== null) {
+      window.cancelAnimationFrame(this.mobileAutoScrollRaf);
+      this.mobileAutoScrollRaf = null;
+    }
+    this.mobileAutoScrollVelocity = 0;
+  }
+
+  private startMobileAutoScroll() {
+    if (this.mobileAutoScrollRaf !== null) return;
+
+    const tick = () => {
+      if (!this.mobileDragActive) {
+        this.stopMobileAutoScroll();
+        return;
+      }
+
+      if (this.mobileAutoScrollVelocity !== 0) {
+        window.scrollBy(0, this.mobileAutoScrollVelocity);
+        const targetId = this.getWidgetIdFromPoint(this.mobilePointerClientX, this.mobilePointerClientY);
+        if (targetId) {
+          this.mobileDropTargetWidgetId = targetId;
+        }
+      }
+
+      this.mobileAutoScrollRaf = window.requestAnimationFrame(tick);
+    };
+
+    this.mobileAutoScrollRaf = window.requestAnimationFrame(tick);
+  }
+
+  private updateMobileAutoScroll(clientY: number) {
+    const edgeThreshold = 88;
+    const maxStep = 16;
+    let velocity = 0;
+
+    if (clientY < edgeThreshold) {
+      velocity = -Math.max(1, Math.round(((edgeThreshold - clientY) / edgeThreshold) * maxStep));
+    } else if (clientY > window.innerHeight - edgeThreshold) {
+      velocity = Math.max(1, Math.round(((clientY - (window.innerHeight - edgeThreshold)) / edgeThreshold) * maxStep));
+    }
+
+    this.mobileAutoScrollVelocity = velocity;
+    if (velocity !== 0) {
+      this.startMobileAutoScroll();
+      return;
+    }
+    this.stopMobileAutoScroll();
+  }
+
+  private getWidgetIdFromPoint(clientX: number, clientY: number) {
+    const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    const card = el?.closest(".dashboard-widget") as HTMLElement | null;
+    return card?.dataset.widgetId ?? "";
+  }
+
+  private resetMobileDragState() {
+    this.clearMobileLongPress();
+    this.stopMobileAutoScroll();
+    this.setMobileDragScrollLock(false);
+    this.mobileDragActive = false;
+    this.activeDragWidgetId = "";
+    this.mobileDropTargetWidgetId = "";
+  }
+
+  private onGripPointerDown(event: PointerEvent, widgetId: string) {
+    if (!this.layoutEditorOpen || !this.isMobileLayout) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("button, select, input, textarea, a, label")) return;
+    (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
+    this.clearMobileLongPress();
+    this.mobileDragActive = false;
+    this.activeDragWidgetId = "";
+    this.mobileDropTargetWidgetId = "";
+    this.mobilePointerStartX = event.clientX;
+    this.mobilePointerStartY = event.clientY;
+    this.mobilePointerClientX = event.clientX;
+    this.mobilePointerClientY = event.clientY;
+    this.mobileLongPressTimer = setTimeout(() => {
+      this.mobileDragActive = true;
+      this.activeDragWidgetId = widgetId;
+      this.mobileDropTargetWidgetId = widgetId;
+      this.setMobileDragScrollLock(true);
+      this.updateMobileAutoScroll(this.mobilePointerClientY);
+    }, 500);
+  }
+
+  private onGripPointerMove(event: PointerEvent) {
+    if (!this.layoutEditorOpen || !this.isMobileLayout) return;
+    this.mobilePointerClientX = event.clientX;
+    this.mobilePointerClientY = event.clientY;
+
+    if (!this.mobileDragActive) {
+      const deltaX = Math.abs(event.clientX - this.mobilePointerStartX);
+      const deltaY = Math.abs(event.clientY - this.mobilePointerStartY);
+      if (deltaX > 8 || deltaY > 8) {
+        this.clearMobileLongPress();
+      }
+      return;
+    }
+
+    event.preventDefault();
+    const targetId = this.getWidgetIdFromPoint(event.clientX, event.clientY);
+    if (targetId) {
+      this.mobileDropTargetWidgetId = targetId;
+    }
+    this.updateMobileAutoScroll(event.clientY);
+  }
+
+  private onGripPointerUp(event: PointerEvent) {
+    if (!this.layoutEditorOpen || !this.isMobileLayout) return;
+    (event.currentTarget as HTMLElement | null)?.releasePointerCapture?.(event.pointerId);
+
+    const wasDragging = this.mobileDragActive;
+    const sourceId = this.activeDragWidgetId;
+    const targetId = this.mobileDropTargetWidgetId;
+    this.resetMobileDragState();
+
+    if (wasDragging && sourceId && targetId && sourceId !== targetId) {
+      this.moveWidget(sourceId, targetId);
+    }
+  }
+
+  private onGripPointerCancel(event: PointerEvent) {
+    if (!this.layoutEditorOpen || !this.isMobileLayout) return;
+    (event.currentTarget as HTMLElement | null)?.releasePointerCapture?.(event.pointerId);
+    this.resetMobileDragState();
   }
 
   private resolveApiOrigin() {
@@ -1181,27 +1482,41 @@ export class MissionControlView extends LitElement {
 
   private renderWidgetCard(widget: DashboardWidgetLayout) {
     const definition = this.getWidgetDefinition(widget.type);
-    const allowedSizes = definition?.allowedSizes ?? ["small", "medium", "large"];
+    const allowedSizes = this.isMobileLayout
+      ? (["small"] as DashboardWidgetLayout["size"][])
+      : (definition?.allowedSizes ?? ["small", "medium", "large"]);
     const fallbackSize = definition?.defaultSize ?? "small";
-    const effectiveSize = allowedSizes.includes(widget.size)
+    const effectiveSize = this.isMobileLayout
+      ? "small"
+      : allowedSizes.includes(widget.size)
       ? widget.size
       : (allowedSizes.includes(fallbackSize) ? fallbackSize : allowedSizes[0]);
-    const span = this.getWidgetSpan(effectiveSize);
+    const span = this.isMobileLayout ? 1 : this.getWidgetSpan(effectiveSize);
     const widgetForRender = effectiveSize === widget.size ? widget : { ...widget, size: effectiveSize };
     const row = Math.floor(widget.row);
     const col = Math.floor(widget.col);
-    const styleParts = [
-      `grid-column: ${col} / span ${span};`,
-      `grid-row: ${row};`,
-    ].filter(Boolean);
+    const styleParts = this.isMobileLayout
+      ? ["grid-column: 1 / -1;"]
+      : [
+        `grid-column: ${col} / span ${span};`,
+        `grid-row: ${row};`,
+      ].filter(Boolean);
     const showFilterToggle = !this.layoutEditorOpen && (widget.type === "task-recent-list" || widget.type === "task-history");
+    const isLifted = this.activeDragWidgetId === widget.id;
+    const isDropTarget = this.mobileDropTargetWidgetId === widget.id && this.activeDragWidgetId !== widget.id;
 
     return html`
       <article
-        class="dashboard-widget dashboard-widget--${effectiveSize} ${this.layoutEditorOpen ? "dashboard-widget--editing" : ""}"
+        data-widget-id=${widget.id}
+        class="dashboard-widget dashboard-widget--${effectiveSize} ${this.layoutEditorOpen ? "dashboard-widget--editing" : ""} ${isLifted ? "dashboard-widget--lifted" : ""} ${isDropTarget ? "dashboard-widget--drop-target" : ""}"
         style=${styleParts.join(" ")}
-        draggable=${this.layoutEditorOpen ? "true" : "false"}
+        draggable=${this.layoutEditorOpen && !this.isMobileLayout ? "true" : "false"}
+        @pointerdown=${(event: PointerEvent) => this.onGripPointerDown(event, widget.id)}
+        @pointermove=${(event: PointerEvent) => this.onGripPointerMove(event)}
+        @pointerup=${(event: PointerEvent) => this.onGripPointerUp(event)}
+        @pointercancel=${(event: PointerEvent) => this.onGripPointerCancel(event)}
         @dragstart=${(event: DragEvent) => this.onWidgetDragStart(event, widget.id)}
+        @dragend=${() => this.onWidgetDragEnd()}
         @dragover=${(event: DragEvent) => {
           event.preventDefault();
           event.stopPropagation();
@@ -1210,7 +1525,12 @@ export class MissionControlView extends LitElement {
       >
         <header class="dashboard-widget__header">
           <div class="dashboard-widget__title-group">
-            ${this.layoutEditorOpen ? html`<span class="dashboard-widget__grip" title="Drag to reorder">⠿</span>` : nothing}
+            ${this.layoutEditorOpen ? html`
+              <span
+                class="dashboard-widget__grip"
+                title=${this.isMobileLayout ? "Hold anywhere on widget for 0.5s, then drag onto another widget" : "Drag to reorder"}
+              >⠿</span>
+            ` : nothing}
             <div>
               <h3>${definition?.title ?? widget.type}</h3>
               ${definition?.description ? html`<p>${definition.description}</p>` : nothing}
@@ -1224,7 +1544,7 @@ export class MissionControlView extends LitElement {
                   ${this.showFilters ? "Hide filter" : "Filter"}
                 </button>
               ` : nothing}
-              ${this.layoutEditorOpen ? html`
+              ${this.layoutEditorOpen && !this.isMobileLayout ? html`
                 <select
                   class="field__select dashboard-widget__size-select"
                   aria-label="Widget size"
@@ -1239,7 +1559,6 @@ export class MissionControlView extends LitElement {
         </header>
 
         <div class="dashboard-widget__body">
-          ${this.layoutEditorOpen ? html`<div class="dashboard-widget__drop-hint">Drop another widget here to reshuffle the layout.</div>` : nothing}
           ${this.renderWidgetContent(widgetForRender)}
         </div>
       </article>
@@ -1257,6 +1576,11 @@ export class MissionControlView extends LitElement {
               : this.layoutDirty
                 ? "Unsaved layout changes"
                 : "No unsaved changes"}
+          </span>
+          <span>
+            ${this.isMobileLayout
+              ? "Hold any widget for 0.5s, then drag it onto another widget to reorder."
+              : "Drag one widget onto another to reorder."}
           </span>
         </div>
         <div class="dashboard-toolbar__actions">
@@ -1301,9 +1625,6 @@ export class MissionControlView extends LitElement {
             <p class="mission-control__meta">SQLite task traces with events and documents. Use Edit layout to rearrange widgets.</p>
           </div>
           <div class="content__actions">
-            <button class="btn btn--ghost btn--sm" @click=${() => void this.refresh()}>
-              ${this.loading ? "Refreshing..." : "Refresh"}
-            </button>
             <button class="btn btn--primary btn--sm" @click=${() => this.toggleLayoutEditor()}>
               ${this.layoutEditorOpen ? "Close editor" : "Edit layout"}
             </button>
