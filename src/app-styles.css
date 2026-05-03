@@ -1398,6 +1398,70 @@ html, body {
   align-items: center;
 }
 
+/* --- Mission Control detail expansions and lists --- */
+.widget-list-item__details {
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  font-size: 13px;
+  border: 1px solid var(--border);
+}
+
+.details-section {
+  margin-bottom: 10px;
+}
+
+.details-item {
+  display: flex;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--border-strong);
+  align-items: center;
+}
+
+.details-item:last-child {
+  border-bottom: none;
+}
+
+.details-item__type {
+  font-weight: 600;
+  color: var(--fg-secondary);
+  min-width: 140px;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.details-item__text {
+  color: var(--fg);
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.details-item__path {
+  color: var(--muted);
+  margin-left: 8px;
+}
+
+.details-item__time {
+  color: var(--muted);
+  font-size: 12px;
+  margin-left: 12px;
+  flex-shrink: 0;
+}
+
+.btn-expand {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
 .mc-pagination__meta {
   display: flex;
   gap: 12px;

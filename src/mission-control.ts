@@ -154,6 +154,7 @@ export class MissionControlView extends LitElement {
   @state() private sessionPickerSearch = "";
   @state() private subagentRuns: SubagentRunRecord[] = [];
   @state() private subagentSessions: SubagentSessionRecord[] = [];
+  @state() private expandedTaskIds: Set<string | number> = new Set();
 
   private readonly apiPath = "/api/mission-control/chatui";
   private readonly subagentRunsPath = "/api/subagents/runs";
@@ -1386,11 +1387,15 @@ export class MissionControlView extends LitElement {
         ${this.showFilters ? this.renderSessionTabs() : nothing}
         ${this.showFilters ? this.renderFilterPanel() : nothing}
         <div class="widget-list">
-        ${tasks.map((task) => html`
+        ${tasks.map((task) => {
+          const taskId = task.id ?? task.runId ?? "";
+          const isExpanded = this.expandedTaskIds.has(taskId);
+          return html`
           <article class="widget-list-item">
             <div class="widget-list-item__title-row">
               <span class="badge ${this.statusBadgeClass(task.status)}">${task.status || "unknown"}</span>
               <strong>${task.runId || task.id || "task"}</strong>
+              <button class="btn btn--ghost btn--xs btn-expand" @click=${() => this.toggleTaskExpansion(taskId)}>${isExpanded ? "▾" : "▸"}</button>
             </div>
             <div class="widget-list-item__body">${task.title || task.prompt || "Untitled task"}</div>
             <div class="widget-list-item__meta">
@@ -1398,8 +1403,26 @@ export class MissionControlView extends LitElement {
               <span>${this.formatTokenCount(task.totalTokens ?? task.inputTokens)} tokens</span>
               <span>${this.formatUsd(task.estimatedCostUsd)}</span>
             </div>
-          </article>
-        `)}
+            ${isExpanded ? html`
+              <div class="widget-list-item__details">
+                ${task.events && task.events.length ? html`
+                  <div class="details-section"><strong>Events (${task.events.length})</strong>
+                    <div>${task.events.map(e => html`<div class="details-item"><span class="details-item__type">${e.eventType || e.action}</span><span class="details-item__text">${e.message ?? e.description ?? ""}</span><span class="details-item__time">${this.formatDate(e.timestamp)}</span></div>`)}</div>
+                  </div>` : nothing}
+
+                ${task.documents && task.documents.length ? html`
+                  <div class="details-section"><strong>Documents (${task.documents.length})</strong>
+                    <div>${task.documents.map(d => html`<div class="details-item"><span class="details-item__type">${d.title ?? d.type ?? "doc"}</span>${d.path ? html`<span class="details-item__path">${d.path}</span>` : nothing}<span class="details-item__time">${this.formatDate(d.timestamp)}</span></div>`)}</div>
+                  </div>` : nothing}
+
+                ${this.subagentRuns && this.subagentRuns.length ? html`
+                  <div class="details-section"><strong>Subagent runs (recent)</strong>
+                    <div>${this.subagentRuns.filter(r => r.runId === task.runId).map(r => html`<div class="details-item">${JSON.stringify(r.entry)}</div>`)}</div>
+                  </div>` : nothing}
+              </div>
+            ` : nothing}
+          </article>`;
+        })}
         </div>
       </div>
     `;
@@ -1419,12 +1442,16 @@ export class MissionControlView extends LitElement {
         ${this.showFilters ? this.renderSessionTabs() : nothing}
         ${this.showFilters ? this.renderFilterPanel() : nothing}
         <div class="widget-history">
-        ${tasks.map((task) => html`
+        ${tasks.map((task) => {
+          const taskId = task.id ?? task.runId ?? "";
+          const isExpanded = this.expandedTaskIds.has(taskId);
+          return html`
           <article class="widget-history-item">
             <header class="widget-history-item__header">
               <span class="badge ${this.statusBadgeClass(task.status)}">${task.status || "unknown"}</span>
               <strong>${task.runId || task.id || "task"}</strong>
               <span>${this.formatDate(task.timestamp)}</span>
+              <button class="btn btn--ghost btn--xs btn-expand" @click=${() => this.toggleTaskExpansion(taskId)}>${isExpanded ? "▾" : "▸"}</button>
             </header>
             <div class="widget-history-item__summary">
               <span>${task.sessionKey || task.sessionId || "-"}</span>
@@ -1432,12 +1459,25 @@ export class MissionControlView extends LitElement {
               <span>${this.formatTokenCount(task.totalTokens ?? task.inputTokens)} tokens</span>
             </div>
             <p class="widget-preview">${task.title || task.prompt || task.description || "No description"}</p>
-          </article>
-        `)}
+            ${isExpanded ? html`
+              <div class="widget-list-item__details">
+                ${task.events && task.events.length ? html`<div class="details-section"><strong>Events (${task.events.length})</strong><div>${task.events.map(e => html`<div class="details-item"><span class="details-item__type">${e.eventType || e.action}</span><span class="details-item__text">${e.message ?? e.description ?? ""}</span><span class="details-item__time">${this.formatDate(e.timestamp)}</span></div>`)}</div></div>` : nothing}
+                ${task.documents && task.documents.length ? html`<div class="details-section"><strong>Documents (${task.documents.length})</strong><div>${task.documents.map(d => html`<div class="details-item"><span class="details-item__type">${d.title ?? d.type ?? "doc"}</span>${d.path ? html`<span class="details-item__path">${d.path}</span>` : nothing}<span class="details-item__time">${this.formatDate(d.timestamp)}</span></div>`)}</div></div>` : nothing}
+              </div>
+            ` : nothing}
+          </article>`;
+        })}
         </div>
       </div>
     `;
   }
+
+    private toggleTaskExpansion(taskId: string | number) {
+      const next = new Set(this.expandedTaskIds);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      this.expandedTaskIds = next;
+    }
 
   private renderSubagentSummaryWidget(size: DashboardWidgetLayout["size"]) {
     const recentRuns = this.subagentRuns.slice(0, size === "small" ? 3 : 5);
