@@ -1405,20 +1405,41 @@ export class MissionControlView extends LitElement {
             </div>
             ${isExpanded ? html`
               <div class="widget-list-item__details">
+                <div class="details-section">
+                  <strong>Task Fields</strong>
+                  <div class="mc-nested-grid">
+                    ${this.renderRow("Run", task.runId || "-")}
+                    ${this.renderRow("Session ID", task.sessionId || "-")}
+                    ${this.renderRow("Session Key", task.sessionKey || "-")}
+                    ${this.renderRow("Agent", task.agentId || "-")}
+                    ${this.renderRow("Status", task.status || "-")}
+                    ${this.renderRow("Source", task.source || "-")}
+                    ${this.renderRow("At", this.formatDate(task.timestamp))}
+                    ${this.renderRow("Input Tokens", this.formatTokenCount(task.inputTokens))}
+                    ${this.renderRow("Output Tokens", this.formatTokenCount(task.outputTokens))}
+                    ${this.renderRow("Cache Read Tokens", this.formatTokenCount(task.cacheReadTokens))}
+                    ${this.renderRow("Cache Write Tokens", this.formatTokenCount(task.cacheWriteTokens))}
+                    ${this.renderRow("Total Tokens", this.formatTokenCount(task.totalTokens))}
+                    ${this.renderRow("Estimated Cost (USD)", this.formatUsd(task.estimatedCostUsd))}
+                    ${task.responseUsage ? this.renderRow("Response Usage", this.renderStructuredValue(task.responseUsage, `task:${task.id || task.runId}:response-usage`)) : nothing}
+                    ${task.metadata ? this.renderRow("Metadata", this.renderStructuredValue(task.metadata, `task:${task.id || task.runId}:metadata`)) : nothing}
+                  </div>
+                  ${this.renderTextDetails(task.prompt, "Prompt", `task:${task.id || task.runId}:prompt`)}
+                  ${this.renderTextDetails(task.response, "Response", `task:${task.id || task.runId}:response`)}
+                  ${this.renderTextDetails(task.error, "Error", `task:${task.id || task.runId}:error`)}
+                </div>
+
                 ${task.events && task.events.length ? html`
                   <div class="details-section"><strong>Events (${task.events.length})</strong>
-                    <div>${task.events.map(e => html`<div class="details-item"><span class="details-item__type">${e.eventType || e.action}</span><span class="details-item__text">${e.message ?? e.description ?? ""}</span><span class="details-item__time">${this.formatDate(e.timestamp)}</span></div>`)}</div>
+                    <div class="mc-nested-list">${task.events.map(e => this.renderEvent(e))}</div>
                   </div>` : nothing}
 
                 ${task.documents && task.documents.length ? html`
                   <div class="details-section"><strong>Documents (${task.documents.length})</strong>
-                    <div>${task.documents.map(d => html`<div class="details-item"><span class="details-item__type">${d.title ?? d.type ?? "doc"}</span>${d.path ? html`<span class="details-item__path">${d.path}</span>` : nothing}<span class="details-item__time">${this.formatDate(d.timestamp)}</span></div>`)}</div>
+                    <div class="mc-nested-list">${task.documents.map(d => this.renderDocument(d))}</div>
                   </div>` : nothing}
 
-                ${this.subagentRuns && this.subagentRuns.length ? html`
-                  <div class="details-section"><strong>Subagent runs (recent)</strong>
-                    <div>${this.subagentRuns.filter(r => r.runId === task.runId).map(r => html`<div class="details-item">${JSON.stringify(r.entry)}</div>`)}</div>
-                  </div>` : nothing}
+                ${this.renderSubagentSection(task, `task:${task.id || task.runId}`)}
               </div>
             ` : nothing}
           </article>`;
@@ -1461,8 +1482,34 @@ export class MissionControlView extends LitElement {
             <p class="widget-preview">${task.title || task.prompt || task.description || "No description"}</p>
             ${isExpanded ? html`
               <div class="widget-list-item__details">
-                ${task.events && task.events.length ? html`<div class="details-section"><strong>Events (${task.events.length})</strong><div>${task.events.map(e => html`<div class="details-item"><span class="details-item__type">${e.eventType || e.action}</span><span class="details-item__text">${e.message ?? e.description ?? ""}</span><span class="details-item__time">${this.formatDate(e.timestamp)}</span></div>`)}</div></div>` : nothing}
-                ${task.documents && task.documents.length ? html`<div class="details-section"><strong>Documents (${task.documents.length})</strong><div>${task.documents.map(d => html`<div class="details-item"><span class="details-item__type">${d.title ?? d.type ?? "doc"}</span>${d.path ? html`<span class="details-item__path">${d.path}</span>` : nothing}<span class="details-item__time">${this.formatDate(d.timestamp)}</span></div>`)}</div></div>` : nothing}
+                <div class="details-section">
+                  <strong>Task Fields</strong>
+                  <div class="mc-nested-grid">
+                    ${this.renderRow("Run", task.runId || "-")}
+                    ${this.renderRow("Session ID", task.sessionId || "-")}
+                    ${this.renderRow("Session Key", task.sessionKey || "-")}
+                    ${this.renderRow("Agent", task.agentId || "-")}
+                    ${this.renderRow("Status", task.status || "-")}
+                    ${this.renderRow("Source", task.source || "-")}
+                    ${this.renderRow("At", this.formatDate(task.timestamp))}
+                    ${this.renderRow("Input Tokens", this.formatTokenCount(task.inputTokens))}
+                    ${this.renderRow("Output Tokens", this.formatTokenCount(task.outputTokens))}
+                    ${this.renderRow("Cache Read Tokens", this.formatTokenCount(task.cacheReadTokens))}
+                    ${this.renderRow("Cache Write Tokens", this.formatTokenCount(task.cacheWriteTokens))}
+                    ${this.renderRow("Total Tokens", this.formatTokenCount(task.totalTokens))}
+                    ${this.renderRow("Estimated Cost (USD)", this.formatUsd(task.estimatedCostUsd))}
+                    ${task.responseUsage ? this.renderRow("Response Usage", this.renderStructuredValue(task.responseUsage, `task:${task.id || task.runId}:response-usage`)) : nothing}
+                    ${task.metadata ? this.renderRow("Metadata", this.renderStructuredValue(task.metadata, `task:${task.id || task.runId}:metadata`)) : nothing}
+                  </div>
+                  ${this.renderTextDetails(task.prompt, "Prompt", `task:${task.id || task.runId}:prompt`)}
+                  ${this.renderTextDetails(task.response, "Response", `task:${task.id || task.runId}:response`)}
+                  ${this.renderTextDetails(task.error, "Error", `task:${task.id || task.runId}:error`)}
+                </div>
+
+                ${task.events && task.events.length ? html`<div class="details-section"><strong>Events (${task.events.length})</strong><div class="mc-nested-list">${task.events.map(e => this.renderEvent(e))}</div></div>` : nothing}
+                ${task.documents && task.documents.length ? html`<div class="details-section"><strong>Documents (${task.documents.length})</strong><div class="mc-nested-list">${task.documents.map(d => this.renderDocument(d))}</div></div>` : nothing}
+
+                ${this.renderSubagentSection(task, `task:${task.id || task.runId}`)}
               </div>
             ` : nothing}
           </article>`;
