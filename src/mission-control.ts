@@ -22,12 +22,6 @@ interface MissionControlEvent {
   description?: string;
   message?: string;
   data?: unknown;
-  inputTokens?: number | null;
-  outputTokens?: number | null;
-  cacheReadTokens?: number | null;
-  cacheWriteTokens?: number | null;
-  totalTokens?: number | null;
-  estimatedCostUsd?: number | null;
   timestamp?: string;
   createdAt?: string;
 }
@@ -1166,17 +1160,6 @@ export class MissionControlView extends LitElement {
         </header>
 
         ${event.description ? html`<p class="mc-description">${event.description}</p>` : nothing}
-
-        ${(event.inputTokens !== null && event.inputTokens !== undefined) || (event.totalTokens !== null && event.totalTokens !== undefined) ? html`
-          <div class="mc-nested-grid">
-            ${event.inputTokens !== null && event.inputTokens !== undefined ? this.renderRow("Input Tokens", event.inputTokens.toLocaleString()) : nothing}
-            ${event.outputTokens !== null && event.outputTokens !== undefined ? this.renderRow("Output Tokens", event.outputTokens.toLocaleString()) : nothing}
-            ${event.cacheReadTokens !== null && event.cacheReadTokens !== undefined ? this.renderRow("Cache Read", event.cacheReadTokens.toLocaleString()) : nothing}
-            ${event.cacheWriteTokens !== null && event.cacheWriteTokens !== undefined ? this.renderRow("Cache Write", event.cacheWriteTokens.toLocaleString()) : nothing}
-            ${event.totalTokens !== null && event.totalTokens !== undefined ? this.renderRow("Total Tokens", event.totalTokens.toLocaleString()) : nothing}
-            ${event.estimatedCostUsd !== null && event.estimatedCostUsd !== undefined ? this.renderRow("Est. Cost", this.formatUsd(event.estimatedCostUsd)) : nothing}
-          </div>
-        ` : nothing}
 
         ${eventDetails}
       </article>
