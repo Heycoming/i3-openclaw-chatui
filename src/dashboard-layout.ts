@@ -8,6 +8,7 @@ export interface DashboardWidgetLayout {
   size: WidgetSize;
   row: number;
   col: number;
+  config?: Record<string, unknown>;
 }
 
 export type DashboardWidgetDraft = Omit<DashboardWidgetLayout, "row" | "col"> & Partial<Pick<DashboardWidgetLayout, "row" | "col">>;
@@ -149,10 +150,12 @@ export function isDashboardLayoutFile(value: unknown): value is DashboardLayoutF
       || (typeof widgetRecord.row === "number" && Number.isFinite(widgetRecord.row) && widgetRecord.row >= 1);
     const hasValidCol = widgetRecord.col === undefined
       || (typeof widgetRecord.col === "number" && Number.isFinite(widgetRecord.col) && widgetRecord.col >= 1);
+      const hasValidConfig = widgetRecord.config === undefined || (typeof widgetRecord.config === "object" && widgetRecord.config !== null && !Array.isArray(widgetRecord.config));
     return typeof widgetRecord.id === "string"
       && typeof widgetRecord.type === "string"
       && hasValidRow
       && hasValidCol
+      && hasValidConfig
       && (widgetRecord.size === "small" || widgetRecord.size === "medium" || widgetRecord.size === "large");
   });
 }

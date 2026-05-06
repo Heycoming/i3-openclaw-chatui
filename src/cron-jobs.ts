@@ -58,6 +58,14 @@ export class CronJobsView extends LitElement {
   @state() private runs: CronRunRecord[] = [];
   @state() private nowMs = Date.now();
 
+    // Heartbeat file state
+    @state() private heartbeatContent = "";
+    @state() private heartbeatLoading = false;
+    @state() private heartbeatEditMode = false;
+    @state() private heartbeatEditContent = "";
+    @state() private heartbeatSaving = false;
+    @state() private heartbeatError = "";
+
   // Modal/form state
   @state() private formMode: "create" | "update" | null = null;
   @state() private formJobId = "";
@@ -72,6 +80,8 @@ export class CronJobsView extends LitElement {
   @state() private formScheduleType = "every"; // every, at, cron
   @state() private formScheduleValue = "5";
   @state() private formScheduleUnit = "minutes"; // minutes, hours, days
+  @state() private formAtDateTime = "";
+  @state() private formCronTimezone = "";
   @state() private formSession = "main"; // main, isolated
   @state() private formWakeMode = "now"; // now, next-heartbeat
   @state() private formPayload = "system-event"; // system-event, agent-turn
@@ -86,6 +96,25 @@ export class CronJobsView extends LitElement {
   @state() private actionError = "";
   @state() private actionMessage = "";
   @state() private expandedSparklineJobIds: string[] = [];
+
+  private readonly heartbeatTemplate = [
+    "{",
+    "  agents: {",
+    "    defaults: {",
+    "      heartbeat: {",
+    "        every: \"30m\",",
+    "        target: \"last\", // explicit delivery to last contact (default is \"none\")",
+    "        directPolicy: \"allow\", // default: allow direct/DM targets; set \"block\" to suppress",
+    "        lightContext: true, // optional: only inject HEARTBEAT.md from bootstrap files",
+    "        isolatedSession: true, // optional: fresh session each run (no conversation history)",
+    "        skipWhenBusy: true, // optional: also defer when subagent or nested lanes are busy",
+    "        // activeHours: { start: \"08:00\", end: \"24:00\" },",
+    "        // includeReasoning: true, // optional: send separate `Reasoning:` message too",
+    "      },",
+    "    },",
+    "  },",
+    "}",
+  ].join("\n");
 
   private readonly jobsPath = "/api/cron/jobs";
   private readonly runsPath = "/api/cron/runs?limit=150";
@@ -165,6 +194,7 @@ export class CronJobsView extends LitElement {
     void this.refresh();
     this.loadAgents();
     void this.loadWidgetLayout();
+      void this.loadHeartbeatFile();
     this.viewportResizeHandler = () => {
       const nextIsMobile = this.getIsMobileViewport();
       if (nextIsMobile === this.isMobileLayout) return;
@@ -1385,15 +1415,27 @@ export class CronJobsView extends LitElement {
     }
 
     if (this.formScheduleType === "at") {
+      const at = this.parseDateTimeLocalValue(this.formAtDateTime);
+      if (!at) {
+        throw new Error("At schedule requires a valid date and time.");
+      }
       return {
         kind: "at",
-        at: this.formScheduleValue.trim(),
+        at,
       };
+    }
+
+    const expr = this.formScheduleValue.trim();
+    this.validateCronExpression(expr);
+    const tz = this.formCronTimezone.trim();
+    if (tz && !this.isValidTimeZone(tz)) {
+      throw new Error("Cron timezone must be a valid IANA timezone.");
     }
 
     return {
       kind: "cron",
-      expr: this.formScheduleValue.trim(),
+      expr,
+      ...(tz ? { tz } : {}),
     };
   }
 
@@ -1409,6 +1451,26 @@ export class CronJobsView extends LitElement {
       kind: "systemEvent",
       text: this.formSystemText.trim(),
     };
+  }
+
+  private validateFormPayloadForSession() {
+    const payloadText = this.formSystemText.trim();
+    const isMain = this.formSession === "main";
+    const isIsolated = this.formSession === "isolated";
+
+    // Mirrors OpenClaw cron runtime validation in src/cron/service/timer.ts
+    if (isMain && this.formPayload !== "system-event") {
+      throw new Error('Main session cron jobs require payload kind "System Event"');
+    }
+    if (isMain && !payloadText) {
+      throw new Error("Main session cron jobs require non-empty System Text");
+    }
+    if (isIsolated && this.formPayload !== "agent-turn") {
+      throw new Error('Isolated cron jobs require payload kind "Agent Turn"');
+    }
+    if (isIsolated && !payloadText) {
+      throw new Error("Isolated cron jobs require non-empty message");
+    }
   }
 
   private loadAgents() {
@@ -1446,6 +1508,80 @@ export class CronJobsView extends LitElement {
       this.loading = false;
     }
   }
+
+    private async loadHeartbeatFile() {
+      this.heartbeatLoading = true;
+      this.heartbeatError = "";
+      try {
+        const res = await fetch(this.buildApiUrl("/api/cron/heartbeat"));
+        const payload = (await res.json()) as Record<string, unknown>;
+        if (payload.ok) {
+          this.heartbeatContent = this.normalizeHeartbeatContent(typeof payload.content === "string" ? payload.content : "");
+        } else {
+          this.heartbeatError = typeof payload.error === "string" ? payload.error : "Failed to load heartbeat";
+        }
+      } catch (error) {
+        this.heartbeatError = error instanceof Error ? error.message : String(error);
+        this.heartbeatContent = "";
+      } finally {
+        this.heartbeatLoading = false;
+      }
+    }
+
+    private async saveHeartbeatFile(content: string) {
+      this.heartbeatSaving = true;
+      this.heartbeatError = "";
+      try {
+        const normalizedContent = this.normalizeHeartbeatContent(content);
+        
+        // Check if content is empty
+        if (!normalizedContent.trim()) {
+          throw new Error("Content cannot be empty");
+        }
+        
+        // Validate JavaScript object notation before saving
+        try {
+          new Function('return (' + normalizedContent + ')')();
+        } catch (parseError) {
+          throw new Error(`Invalid JavaScript object notation: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+        }
+
+        const res = await fetch(this.buildApiUrl("/api/cron/heartbeat"), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: normalizedContent }),
+        });
+        const payload = (await res.json()) as Record<string, unknown>;
+        if (payload.ok) {
+          this.heartbeatContent = normalizedContent;
+          this.heartbeatEditContent = normalizedContent;
+          this.heartbeatEditMode = false;
+          this.actionMessage = "Heartbeat file updated";
+        } else {
+          this.heartbeatError = typeof payload.error === "string" ? payload.error : "Failed to save heartbeat";
+        }
+      } catch (error) {
+        this.heartbeatError = error instanceof Error ? error.message : String(error);
+      } finally {
+        this.heartbeatSaving = false;
+      }
+    }
+
+    private normalizeHeartbeatContent(content: string) {
+      const normalized = content.replace(/\r\n/g, "\n");
+      const lines = normalized.split("\n");
+      const nonEmptyLines = lines.filter((line) => line.trim().length > 0);
+      if (!nonEmptyLines.length) {
+        return "";
+      }
+
+      const indentLengths = nonEmptyLines.map((line) => {
+        const match = line.match(/^\s*/);
+        return match ? match[0].length : 0;
+      });
+      const commonIndent = Math.min(...indentLengths);
+      return lines.map((line) => line.slice(commonIndent)).join("\n").trim();
+    }
 
   private extractActionError(payload: CronActionResult, status: number) {
     const topLevel = typeof payload.error === "string" && payload.error.trim() ? payload.error.trim() : "";
@@ -1505,6 +1641,8 @@ export class CronJobsView extends LitElement {
     this.formScheduleType = "every";
     this.formScheduleValue = "5";
     this.formScheduleUnit = "minutes";
+    this.formAtDateTime = this.formatDateTimeLocalValue(new Date(Date.now() + 5 * 60_000));
+    this.formCronTimezone = "";
     this.formSession = "main";
     this.formWakeMode = "now";
     this.formPayload = "system-event";
@@ -1513,6 +1651,8 @@ export class CronJobsView extends LitElement {
 
   private openCreateForm() {
     this.resetForm();
+    this.heartbeatEditMode = false;
+    this.heartbeatEditContent = this.heartbeatContent;
     this.formMode = "create";
   }
 
@@ -1529,19 +1669,29 @@ export class CronJobsView extends LitElement {
         const everyMs = typeof schedule.everyMs === "number" ? schedule.everyMs : Number(schedule.everyMs);
         this.formScheduleValue = Number.isFinite(everyMs) ? String(Math.max(1, everyMs / 60_000)) : "5";
         this.formScheduleUnit = "minutes";
+        this.formAtDateTime = this.formatDateTimeLocalValue(new Date(Date.now() + 5 * 60_000));
+        this.formCronTimezone = "";
       } else if (this.formScheduleType === "at") {
-        this.formScheduleValue = typeof schedule.at === "string" ? schedule.at : "";
+        const atIso = typeof schedule.at === "string" ? schedule.at : "";
+        this.formAtDateTime = atIso ? this.formatDateTimeLocalValue(new Date(atIso)) : this.formatDateTimeLocalValue(new Date(Date.now() + 5 * 60_000));
+        this.formCronTimezone = "";
       } else if (this.formScheduleType === "cron") {
         this.formScheduleValue = typeof schedule.expr === "string" ? schedule.expr : "";
+        this.formCronTimezone = typeof schedule.tz === "string" ? schedule.tz : "";
+        this.formAtDateTime = this.formatDateTimeLocalValue(new Date(Date.now() + 5 * 60_000));
       } else {
         this.formScheduleType = "every";
         this.formScheduleValue = "5";
         this.formScheduleUnit = "minutes";
+        this.formAtDateTime = this.formatDateTimeLocalValue(new Date(Date.now() + 5 * 60_000));
+        this.formCronTimezone = "";
       }
     } else {
       this.formScheduleType = "every";
       this.formScheduleValue = "5";
       this.formScheduleUnit = "minutes";
+      this.formAtDateTime = this.formatDateTimeLocalValue(new Date(Date.now() + 5 * 60_000));
+      this.formCronTimezone = "";
     }
     this.formSession = typeof job.sessionTarget === "string" ? job.sessionTarget : "main";
     this.formWakeMode = typeof job.wakeMode === "string" ? job.wakeMode : "now";
@@ -1554,6 +1704,8 @@ export class CronJobsView extends LitElement {
           ? payload.message
           : ""
       : "";
+    this.heartbeatEditMode = false;
+    this.heartbeatEditContent = this.heartbeatContent;
     this.formMode = "update";
   }
 
@@ -1580,6 +1732,7 @@ export class CronJobsView extends LitElement {
     this.setActionStateStart();
     try {
       if (!this.formName.trim()) throw new Error("Job name is required");
+      this.validateFormPayloadForSession();
       const job = this.buildJobFromForm({ includeId: false });
       await this.performAction(this.jobsPath, "POST", job);
       this.setActionStateDone(`Created job: ${this.formName.trim()}`);
@@ -1595,6 +1748,7 @@ export class CronJobsView extends LitElement {
     this.setActionStateStart();
     try {
       if (!this.formName.trim()) throw new Error("Job name is required");
+      this.validateFormPayloadForSession();
       const patch = this.buildJobFromForm({ includeId: false, jobId });
       await this.performAction(`${this.jobsPath}/${encodeURIComponent(jobId)}`, "PUT", { patch });
       this.setActionStateDone(`Updated job: ${jobId}`);
@@ -1629,7 +1783,9 @@ export class CronJobsView extends LitElement {
   private async runNow(jobId: string) {
     this.setActionStateStart();
     try {
-      await this.performAction(this.runActionPath, "POST", { id: jobId, mode: "force" });
+      // Use per-job run endpoint to ensure id is applied server-side
+      const path = `${this.jobsPath}/${encodeURIComponent(jobId)}/run`;
+      await this.performAction(path, "POST", { mode: "force" });
       this.setActionStateDone(`Run requested: ${jobId}`);
       await this.refresh();
     } catch (error) {
@@ -1637,10 +1793,16 @@ export class CronJobsView extends LitElement {
     }
   }
 
-  private async wake() {
+  private async wake(jobId?: string, text?: string) {
     this.setActionStateStart();
     try {
-      await this.performAction(this.wakePath, "POST", {});
+      // Gateway expects wake params to include 'mode' and 'text'
+      const params: Record<string, unknown> = {
+        mode: this.formWakeMode || "now",
+        text: (typeof text === "string" ? text : this.formSystemText || "") || "",
+      };
+      if (jobId) params.jobId = jobId;
+      await this.performAction(this.wakePath, "POST", params);
       this.setActionStateDone("Wake requested");
       await this.refresh();
     } catch (error) {
@@ -1703,6 +1865,157 @@ export class CronJobsView extends LitElement {
     `;
   }
 
+  private renderHeartbeatSection() {
+    const isEmpty = !this.heartbeatContent.trim();
+    const summaryColor = isEmpty ? "#b91c1c" : "#374151";
+
+    return html`
+      <details class="field" ?open=${false}>
+        <summary class="field__label" style="cursor: pointer; list-style: none; color: ${summaryColor};">
+          Heartbeat File
+          <span style="display: block; font-size: 11px; font-weight: normal; margin-top: 4px; ${isEmpty ? 'color: #b91c1c; font-weight: 700;' : 'color: #999;'}">
+            ${isEmpty
+              ? "Required: this file must contain non-empty content."
+              : "Optional: edit the OpenClaw heartbeat bootstrap file here."}
+          </span>
+        </summary>
+
+        <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 12px;">
+          ${this.heartbeatError ? html`<div class="callout callout--danger">${this.heartbeatError}</div>` : nothing}
+          ${this.actionMessage && !this.heartbeatError ? html`<div class="callout">${this.actionMessage}</div>` : nothing}
+
+          ${this.heartbeatLoading
+            ? html`<div style="color: #666;">Loading heartbeat file...</div>`
+            : html`
+                ${this.heartbeatEditMode
+                  ? html`
+                      <textarea
+                        class="field__input"
+                        rows="8"
+                        .value=${this.heartbeatEditContent}
+                        placeholder="Heartbeat file content (any non-empty text will work)..."
+                        @input=${(event: Event) => {
+                          this.heartbeatEditContent = (event.target as HTMLTextAreaElement).value;
+                        }}
+                        style="font-family: monospace; font-size: 13px;"
+                      ></textarea>
+                      <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                        <button
+                          class="btn btn--ghost btn--sm"
+                          ?disabled=${this.heartbeatSaving}
+                          @click=${() => {
+                            this.heartbeatEditContent = this.heartbeatTemplate;
+                          }}
+                        >
+                          Use Template
+                        </button>
+                        <button
+                          class="btn btn--ghost btn--sm"
+                          ?disabled=${this.heartbeatSaving}
+                          @click=${() => {
+                            this.heartbeatEditMode = false;
+                            this.heartbeatEditContent = this.heartbeatContent;
+                          }}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          class="btn btn--primary btn--sm"
+                          ?disabled=${this.heartbeatSaving}
+                          @click=${() => void this.saveHeartbeatFile(this.heartbeatEditContent)}
+                        >
+                          ${this.heartbeatSaving ? "Saving..." : "Save"}
+                        </button>
+                      </div>
+                    `
+                  : html`
+                      <textarea
+                        class="field__input"
+                        rows="8"
+                        readonly
+                        .value=${this.heartbeatContent || "← (empty)"}
+                        style=${isEmpty
+                          ? "font-family: monospace; font-size: 12px; resize: vertical; background: #fef2f2; color: #b91c1c; border-color: #dc2626;"
+                          : "font-family: monospace; font-size: 12px; resize: vertical; background: #f9fafb; color: #1f2937;"}
+                      ></textarea>
+                      <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                        <button
+                          class="btn ${isEmpty ? 'btn--danger' : 'btn--ghost'} btn--sm"
+                          @click=${() => {
+                            this.heartbeatEditMode = true;
+                            this.heartbeatEditContent = this.heartbeatContent || this.heartbeatTemplate;
+                          }}
+                        >
+                          ${isEmpty ? "⚠️ Fix: Add Content" : "Edit"}
+                        </button>
+                        <button
+                          class="btn btn--ghost btn--sm"
+                          ?disabled=${this.heartbeatLoading}
+                          @click=${() => void this.loadHeartbeatFile()}
+                        >
+                          Refresh
+                        </button>
+                      </div>
+                    `
+                }
+            `}
+        </div>
+      </details>
+    `;
+  }
+
+
+  private renderInfoIcon(tooltip: string) {
+    return html`<span title=${tooltip} style="display: inline-block; margin-left: 4px; width: 16px; height: 16px; line-height: 16px; text-align: center; background: #dbeafe; color: #1e40af; border-radius: 50%; font-size: 12px; font-weight: bold; cursor: help;">i</span>`;
+  }
+
+  private formatDateTimeLocalValue(value: Date) {
+    const pad = (part: number) => String(part).padStart(2, "0");
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}`;
+  }
+
+  private parseDateTimeLocalValue(value: string) {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = new Date(trimmed);
+    return Number.isNaN(parsed.valueOf()) ? null : parsed.toISOString();
+  }
+
+  private validateCronExpression(expr: string) {
+    const trimmed = expr.trim();
+    if (!trimmed) {
+      throw new Error("Cron expression is required.");
+    }
+    const fields = trimmed.split(/\s+/);
+    if (fields.length < 5 || fields.length > 6) {
+      throw new Error("Cron expression must have 5 fields, or 6 with seconds.");
+    }
+    const fieldPattern = /^[0-9A-Za-z*?,/\-#LW?]+$/;
+    if (!fields.every((field) => fieldPattern.test(field))) {
+      throw new Error("Cron expression contains invalid characters.");
+    }
+  }
+
+  private isCronExpressionValid(expr: string): boolean {
+    const trimmed = expr.trim();
+    if (!trimmed) return false;
+    const fields = trimmed.split(/\s+/);
+    if (fields.length < 5 || fields.length > 6) return false;
+    const fieldPattern = /^[0-9A-Za-z*?,/\-#LW?]+$/;
+    return fields.every((field) => fieldPattern.test(field));
+  }
+
+  private isValidTimeZone(timeZone: string) {
+    const trimmed = timeZone.trim();
+    if (!trimmed) return true;
+    try {
+      new Intl.DateTimeFormat(undefined, { timeZone: trimmed });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private renderFormModal() {
     if (!this.formMode) return nothing;
 
@@ -1718,7 +2031,7 @@ export class CronJobsView extends LitElement {
 
             <div style="padding: 16px; display: flex; flex-direction: column; gap: 12px;">
               <div class="field">
-                <label class="field__label">Name</label>
+                 <label class="field__label">Name ${this.renderInfoIcon("Job name (e.g., daily-weather-check)")}</label>
                 <input
                   class="field__input"
                   type="text"
@@ -1726,10 +2039,11 @@ export class CronJobsView extends LitElement {
                   placeholder="Job name"
                   @input=${(event: Event) => { this.formName = (event.target as HTMLInputElement).value; }}
                 />
+                ${this.formName.trim() === "" ? html`<div style="color: #ef4444; font-size: 13px; margin-top: 4px;">Name should be non-empty</div>` : ""}
               </div>
 
               <div class="field">
-                <label class="field__label">Description</label>
+                 <label class="field__label">Description ${this.renderInfoIcon("Optional description of what this job does")}</label>
                 <input
                   class="field__input"
                   type="text"
@@ -1740,54 +2054,122 @@ export class CronJobsView extends LitElement {
               </div>
 
               <div class="field">
-                <label class="field__label">Agent ID</label>
+                 <label class="field__label">Agent ID ${this.renderInfoIcon("Run this job under a specific agent; if missing, uses default")}</label>
                 ${this.renderAgentPicker()}
               </div>
 
               <div class="field">
-                <label class="field__label">
+                 <label class="field__label" style="display: flex; align-items: center; gap: 4px;">
                   <input type="checkbox" .checked=${this.formEnabled} @change=${(event: Event) => { this.formEnabled = (event.target as HTMLInputElement).checked; }} />
                   Enabled
+                  ${this.renderInfoIcon("When enabled, the cron job is scheduled and can run. When disabled, it stays saved but will not execute.")}
                 </label>
               </div>
 
               <div class="field">
-                <label class="field__label">Schedule</label>
-                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
-                  <select
-                    class="field__input"
-                    .value=${this.formScheduleType}
-                    @change=${(event: Event) => { this.formScheduleType = (event.target as HTMLSelectElement).value; }}
-                  >
-                    <option value="every">Every</option>
-                    <option value="at">At</option>
-                    <option value="cron">Cron</option>
-                  </select>
-                  <input
-                    class="field__input"
-                    type="text"
-                    .value=${this.formScheduleValue}
-                    placeholder="Value"
-                    @input=${(event: Event) => { this.formScheduleValue = (event.target as HTMLInputElement).value; }}
-                  />
-                  <select
-                    class="field__input"
-                    .value=${this.formScheduleUnit}
-                    @change=${(event: Event) => { this.formScheduleUnit = (event.target as HTMLSelectElement).value; }}
-                  >
-                    <option value="minutes">Minutes</option>
-                    <option value="hours">Hours</option>
-                    <option value="days">Days</option>
-                  </select>
-                </div>
+                <label class="field__label" style="display: flex; align-items: center; gap: 4px;">
+                  Schedule
+                  ${this.renderInfoIcon("Every = duration + unit. At = a specific datetime. Cron = 5-field or 6-field expression with optional IANA timezone.")}
+                </label>
+                <select
+                  class="field__input"
+                  .value=${this.formScheduleType}
+                  @change=${(event: Event) => {
+                    const nextType = (event.target as HTMLSelectElement).value;
+                    this.formScheduleType = nextType;
+                    if (nextType === "every") {
+                      this.formScheduleValue = "5";
+                      this.formScheduleUnit = "minutes";
+                    } else if (nextType === "at") {
+                      this.formAtDateTime = this.formatDateTimeLocalValue(new Date(Date.now() + 5 * 60_000));
+                    } else {
+                      this.formScheduleValue = "0 9 * * *";
+                      this.formCronTimezone = "";
+                    }
+                  }}
+                >
+                  <option value="every">Every</option>
+                  <option value="at">At</option>
+                  <option value="cron">Cron</option>
+                </select>
+
+                ${this.formScheduleType === "every"
+                  ? html`
+                      <div style="display: grid; grid-template-columns: minmax(0, 1fr) 140px; gap: 8px; margin-top: 8px;">
+                        <input
+                          class="field__input"
+                          type="number"
+                          min="1"
+                          step="1"
+                          .value=${this.formScheduleValue}
+                          placeholder="5"
+                          @input=${(event: Event) => { this.formScheduleValue = (event.target as HTMLInputElement).value; }}
+                        />
+                        <select
+                          class="field__input"
+                          .value=${this.formScheduleUnit}
+                          @change=${(event: Event) => { this.formScheduleUnit = (event.target as HTMLSelectElement).value; }}
+                        >
+                          <option value="minutes">Minutes</option>
+                          <option value="hours">Hours</option>
+                          <option value="days">Days</option>
+                        </select>
+                      </div>
+                      ${(!this.formScheduleValue || parseInt(this.formScheduleValue) <= 0) ? html`<div style="color: #ef4444; font-size: 13px; margin-top: 4px;">Interval should be a positive number</div>` : ""}
+                      <div style="margin-top: 4px; font-size: 11px; color: #6b7280;">
+                        Example: 5 minutes, 2 hours, or 1 day.
+                      </div>
+                    `
+                  : this.formScheduleType === "at"
+                    ? html`
+                        <input
+                          class="field__input"
+                          type="datetime-local"
+                          .value=${this.formAtDateTime}
+                          @input=${(event: Event) => { this.formAtDateTime = (event.target as HTMLInputElement).value; }}
+                          style="margin-top: 8px;"
+                        />
+                        <div style="margin-top: 4px; font-size: 11px; color: #6b7280;">
+                          One-shot timestamp. If you omit a timezone, it is treated as local time.
+                        </div>
+                      `
+                    : html`
+                        <div style="display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 8px; margin-top: 8px;">
+                          <input
+                            class="field__input"
+                            type="text"
+                            .value=${this.formScheduleValue}
+                            placeholder="0 9 * * *"
+                            @input=${(event: Event) => { this.formScheduleValue = (event.target as HTMLInputElement).value; }}
+                          />
+                          <input
+                            class="field__input"
+                            type="text"
+                            .value=${this.formCronTimezone}
+                            placeholder="Optional timezone"
+                            @input=${(event: Event) => { this.formCronTimezone = (event.target as HTMLInputElement).value; }}
+                          />
+                        </div>
+                        ${!this.isCronExpressionValid(this.formScheduleValue) ? html`<div style="color: #ef4444; font-size: 13px; margin-top: 4px;">Cron expression must have 5-6 fields with valid characters</div>` : ""}
+                        <div style="margin-top: 4px; font-size: 11px; color: #6b7280;">
+                          5-field or 6-field cron expression. Optional IANA timezone; otherwise the host local timezone is used.
+                        </div>
+                      `}
               </div>
 
               <div class="field">
-                <label class="field__label">Session Target</label>
+                <label class="field__label" style="display: flex; align-items: center;">
+                  Session Target
+                  ${this.renderInfoIcon("Main: System Event payload in the next heartbeat. Isolated: Agent Turn in cron:<jobId>.")}
+                </label>
                 <select
                   class="field__input"
                   .value=${this.formSession}
-                  @change=${(event: Event) => { this.formSession = (event.target as HTMLSelectElement).value; }}
+                  @change=${(event: Event) => { 
+                    this.formSession = (event.target as HTMLSelectElement).value;
+                    // Auto-set payload kind based on session target
+                    this.formPayload = this.formSession === "isolated" ? "agent-turn" : "system-event";
+                  }}
                 >
                   <option value="main">Main</option>
                   <option value="isolated">Isolated</option>
@@ -1795,7 +2177,10 @@ export class CronJobsView extends LitElement {
               </div>
 
               <div class="field">
-                <label class="field__label">Wake Mode</label>
+                 <label class="field__label" style="display: flex; align-items: center;">
+                  Wake Mode
+                    ${this.renderInfoIcon("Now: immediate heartbeat. Next-Heartbeat: waits for next scheduled check.")}
+                </label>
                 <select
                   class="field__input"
                   .value=${this.formWakeMode}
@@ -1807,11 +2192,15 @@ export class CronJobsView extends LitElement {
               </div>
 
               <div class="field">
-                <label class="field__label">Payload Kind</label>
+                 <label class="field__label" style="display: flex; align-items: center;">
+                  Payload Kind
+                    ${this.renderInfoIcon("Auto-set by session target. Main→SystemEvent, Isolated→AgentTurn.")}
+                </label>
                 <select
                   class="field__input"
                   .value=${this.formPayload}
-                  @change=${(event: Event) => { this.formPayload = (event.target as HTMLSelectElement).value; }}
+                  disabled
+                  style="opacity: 0.6; cursor: not-allowed;"
                 >
                   <option value="system-event">System Event</option>
                   <option value="agent-turn">Agent Turn</option>
@@ -1819,7 +2208,10 @@ export class CronJobsView extends LitElement {
               </div>
 
               <div class="field">
-                <label class="field__label">${this.formPayload === "agent-turn" ? "Message" : "System Text"}</label>
+                 <label class="field__label" style="display: flex; align-items: center;">
+                  ${this.formPayload === "agent-turn" ? "Message" : "System Text"}
+                    ${this.renderInfoIcon("Required non-empty text. For System Events: event text for heartbeat. For Agent Turns: message prompt.")}
+                </label>
                 <textarea
                   class="field__input"
                   rows="3"
@@ -1827,7 +2219,10 @@ export class CronJobsView extends LitElement {
                   placeholder=${this.formPayload === "agent-turn" ? "Agent turn message..." : "System event text..."}
                   @input=${(event: Event) => { this.formSystemText = (event.target as HTMLTextAreaElement).value; }}
                 ></textarea>
+                ${this.formSystemText.trim() === "" ? html`<div style="color: #ef4444; font-size: 13px; margin-top: 4px;">System Text should be non-empty</div>` : ""}
               </div>
+
+              ${this.renderHeartbeatSection()}
             </div>
 
             <div style="padding: 16px; border-top: 1px solid var(--border-color, #eee); display: flex; gap: 8px; justify-content: flex-end;">
@@ -1947,7 +2342,11 @@ export class CronJobsView extends LitElement {
                         </button>
                         <button
                           class="btn btn--ghost btn--xs"
-                          @click=${() => void this.wake()}
+                          @click=${() => {
+                            const payload = this.isRecord(job.payload) ? job.payload : null;
+                            const text = payload ? (typeof payload.text === "string" ? payload.text : typeof payload.message === "string" ? payload.message : "") : "";
+                            void this.wake(id, text);
+                          }}
                         >
                           Wake
                         </button>

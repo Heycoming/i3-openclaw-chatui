@@ -5,11 +5,10 @@ import type { ChatEventPayload } from "./types.js";
 import { uuid } from "./uuid.js";
 import "./views/chat-view.js";
 import "./views/overview-view.js";
-import "./views/logs-view.js";
 import "./mission-control.js";
 import "./cron-jobs.js";
 
-type Tab = "chat" | "overview" | "logs" | "missionControl" | "cronJobs";
+type Tab = "chat" | "overview" | "missionControl" | "cronJobs";
 
 interface ChatMessage {
   id: string;
@@ -412,11 +411,6 @@ export class OpenClawApp extends LitElement {
               <span class="nav__item-icon">📊</span>
               <span class="nav__item-label">Overview</span>
             </button>
-            <button class="nav__item ${this.tab === "logs" ? "nav__item--active" : ""}"
-              @click=${() => this.setTab("logs")}>
-              <span class="nav__item-icon">📜</span>
-              <span class="nav__item-label">Logs</span>
-            </button>
             <button class="nav__item ${this.tab === "missionControl" ? "nav__item--active" : ""}"
               @click=${() => this.setTab("missionControl")}>
               <span class="nav__item-icon">🛰️</span>
@@ -500,10 +494,6 @@ export class OpenClawApp extends LitElement {
             .connectionState=${this.connectionState}
             .serverInfo=${this.client.serverInfo}
           ></overview-view>
-        `;
-      case "logs":
-        return html`
-          <logs-view .client=${this.client}></logs-view>
         `;
       case "missionControl":
         return html`

@@ -108,6 +108,10 @@ interface SubagentSessionsPayload {
 type FilterPreset = "none" | "today" | "last7days" | "success" | "failed" | "running" | "5min" | "10min" | "30min" | "1h" | "6h" | "12h" | "24h";
 type TimePreset = "5min" | "10min" | "30min" | "1h" | "6h" | "12h" | "24h" | "none";
 
+type RecentTasksWidgetConfig = {
+  recentTaskCount?: number;
+};
+
 const DEFAULT_PAGINATION: PaginationMeta = {
   page: 1,
   pageSize: 20,
@@ -1313,6 +1317,15 @@ export class MissionControlView extends LitElement {
     return this.tasks.filter((task) => (task.status || "").toLowerCase() === normalized).length;
   }
 
+  private getRecentTasksWidgetCount(widget: DashboardWidgetLayout) {
+    const config = this.isRecord(widget.config) ? (widget.config as RecentTasksWidgetConfig) : null;
+    const configured = typeof config?.recentTaskCount === "number" ? Math.floor(config.recentTaskCount) : NaN;
+    if (Number.isFinite(configured) && configured > 0) {
+      return Math.min(100, configured);
+    }
+    return widget.size === "small" ? 3 : widget.size === "medium" ? 5 : 8;
+  }
+
   private renderMetricCard(label: string, value: unknown, tone: string = "") {
     return html`
       <div class="widget-metric ${tone ? `widget-metric--${tone}` : ""}">
@@ -1373,9 +1386,9 @@ export class MissionControlView extends LitElement {
     `;
   }
 
-  private renderTaskRecentListWidget(size: DashboardWidgetLayout["size"]) {
+  private renderTaskRecentListWidget(widget: DashboardWidgetLayout) {
     const grouped = this.getSessionGroupedTasks();
-    const limit = size === "small" ? 3 : size === "medium" ? 5 : 8;
+    const limit = this.getRecentTasksWidgetCount(widget);
     const tasks = grouped.slice(0, limit);
 
     if (!tasks.length) {
@@ -1557,7 +1570,7 @@ export class MissionControlView extends LitElement {
       case "task-metrics":
         return this.renderTaskMetricsWidget(widget.size);
       case "task-recent-list":
-        return this.renderTaskRecentListWidget(widget.size);
+        return this.renderTaskRecentListWidget(widget);
       case "task-history":
         return this.renderTaskHistoryWidget(widget.size);
       case "subagent-summary":
@@ -1589,6 +1602,7 @@ export class MissionControlView extends LitElement {
         `grid-row: ${row};`,
       ].filter(Boolean);
     const showFilterToggle = !this.layoutEditorOpen && (widget.type === "task-recent-list" || widget.type === "task-history");
+    const recentTaskCount = widget.type === "task-recent-list" ? this.getRecentTasksWidgetCount(widget) : 0;
     const isLifted = this.activeDragWidgetId === widget.id;
     const isDropTarget = this.mobileDropTargetWidgetId === widget.id && this.activeDragWidgetId !== widget.id;
 
@@ -1630,6 +1644,29 @@ export class MissionControlView extends LitElement {
                 <button class="btn btn--ghost btn--sm" @click=${() => { this.showFilters = !this.showFilters; }}>
                   ${this.showFilters ? "Hide filter" : "Filter"}
                 </button>
+              ` : nothing}
+              ${this.layoutEditorOpen && widget.type === "task-recent-list" ? html`
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary, #64748b);">
+                  Show
+                  <input
+                    class="field__input"
+                    type="number"
+                    min="1"
+                    max="100"
+                    step="1"
+                    style="width: 78px; padding: 6px 8px;"
+                    .value=${String(recentTaskCount)}
+                    @change=${(event: Event) => {
+                      const value = Math.max(1, Math.min(100, Math.floor(Number((event.target as HTMLInputElement).value) || 0)));
+                      this.updateWidgetLayout((widgets) => widgets.map((current) => (
+                        current.id === widget.id
+                          ? { ...current, config: { ...(this.isRecord(current.config) ? current.config : {}), recentTaskCount: value } }
+                          : current
+                      )));
+                    }}
+                  />
+                  tasks
+                </label>
               ` : nothing}
               ${this.layoutEditorOpen && !this.isMobileLayout ? html`
                 <select
