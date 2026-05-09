@@ -973,25 +973,58 @@ html, body {
 }
 
 /* --- Tool Cards --- */
+.chat-bubble--tool {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+}
+
 .chat-bubble__tools {
   margin-top: 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .tool-card {
-  background: var(--bg-subtle);
+  background: rgba(255, 255, 255, 0.35);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 10px 12px;
+  padding: 0;
   font-size: 12px;
+  overflow: hidden;
+}
+
+.tool-card__summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tool-card__summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-card__summary-hint {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.tool-card[open] .tool-card__summary {
+  border-bottom: 1px solid var(--border);
 }
 
 .tool-card__name {
   font-weight: 600;
-  margin-bottom: 4px;
   color: var(--accent-hover);
+}
+
+.tool-card__details {
+  padding: 10px 12px 12px;
+  background: var(--panel);
 }
 
 .tool-card__input {
@@ -999,7 +1032,7 @@ html, body {
   font-size: 11px;
   white-space: pre-wrap;
   color: var(--muted);
-  max-height: 100px;
+  max-height: 180px;
   overflow-y: auto;
   margin: 0;
   line-height: 1.5;

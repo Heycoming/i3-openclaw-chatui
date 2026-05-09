@@ -175,16 +175,115 @@ export class ChatView extends LitElement {
     return groups;
   }
 
+  private isToolRole(role: string) {
+    const normalized = role.toLowerCase();
+    return normalized === "tool" || normalized === "toolresult" || normalized === "tool_result";
+  }
+
+  private isToolBlock(block: Record<string, unknown>) {
+    const type = String(block.type ?? "").toLowerCase();
+    return type.includes("tool") || type === "result" || type === "input" || Boolean(block.tool_name) || Boolean(block.toolInput);
+  }
+
+  private getMessageText(msg: ChatMessage) {
+    if (msg.text && msg.text.trim()) return msg.text.trim();
+    if (!Array.isArray(msg.content)) return "";
+    return msg.content
+      .filter((c) => c.type === "text" && typeof c.text === "string" && c.text.trim())
+      .map((c) => c.text!.trim())
+      .join("\n\n");
+  }
+
+  private getMessageToolBlocks(msg: ChatMessage) {
+    const blocks = Array.isArray(msg.content) ? msg.content : [];
+    const role = msg.role.toLowerCase();
+    const toolBlocks = blocks.filter((block) => this.isToolBlock(block as Record<string, unknown>));
+    if (toolBlocks.length > 0) {
+      return toolBlocks;
+    }
+    if (!this.isToolRole(role)) {
+      return [];
+    }
+    const raw = msg as Record<string, unknown>;
+    const summary = typeof raw.toolName === "string" ? raw.toolName : typeof raw.tool_name === "string" ? raw.tool_name : typeof raw.name === "string" ? raw.name : "tool result";
+    return summary ? [{ type: "tool_result", tool_name: summary, content: raw.content, details: raw.details, tool_input: raw.tool_input }] : [];
+  }
+
+  private hasRenderableMessage(msg: ChatMessage) {
+    return Boolean(this.getMessageText(msg) || this.getMessageToolBlocks(msg).length);
+  }
+
+  private formatToolTitle(block: Record<string, unknown>, isToolResult: boolean) {
+    const toolName = typeof block.tool_name === "string" && block.tool_name.trim()
+      ? block.tool_name.trim()
+      : typeof block.name === "string" && block.name.trim()
+        ? block.name.trim()
+        : typeof block.toolName === "string" && block.toolName.trim()
+          ? block.toolName.trim()
+          : "tool";
+    return isToolResult ? `tool result: ${toolName}` : toolName;
+  }
+
+  private formatToolDetails(block: Record<string, unknown>) {
+    const chunks: string[] = [];
+    const args = block.arguments ?? block.tool_input ?? block.input;
+    if (args !== undefined) {
+      chunks.push(typeof args === "string" ? args : JSON.stringify(args, null, 2));
+    }
+    const details = block.details;
+    if (details !== undefined) {
+      chunks.push(typeof details === "string" ? details : JSON.stringify(details, null, 2));
+    }
+    const text = typeof block.text === "string" ? block.text.trim() : "";
+    if (text) {
+      chunks.push(text);
+    }
+    const content = block.content;
+    if (Array.isArray(content)) {
+      const contentText = content
+        .map((item) => (item && typeof item === "object" && typeof (item as { text?: unknown }).text === "string" ? String((item as { text?: unknown }).text).trim() : ""))
+        .filter(Boolean)
+        .join("\n\n");
+      if (contentText) {
+        chunks.push(contentText);
+      }
+    }
+    return chunks.filter(Boolean).join("\n\n");
+  }
+
+  private renderToolCard(block: Record<string, unknown>, isToolResult: boolean) {
+    const title = this.formatToolTitle(block, isToolResult);
+    const details = this.formatToolDetails(block);
+
+    return html`
+      <details class="tool-card chat-tool-card">
+        <summary class="tool-card__summary">
+          <span class="tool-card__name">🔧 ${title}</span>
+          <span class="tool-card__summary-hint">details</span>
+        </summary>
+        ${details ? html`
+          <div class="tool-card__details">
+            <pre class="tool-card__input">${details}</pre>
+          </div>
+        ` : nothing}
+      </details>
+    `;
+  }
+
   private renderMessageGroup(group: ChatMessage[]) {
-    const role = group[0].role;
+    const visibleMessages = group.filter((msg) => this.hasRenderableMessage(msg));
+    if (visibleMessages.length === 0) return nothing;
+
+    const role = visibleMessages[0].role;
     const isUser = role === "user";
-    const lastMsg = group[group.length - 1];
+    const isTool = this.isToolRole(role);
+    const lastMsg = visibleMessages[visibleMessages.length - 1];
 
     return html`
       <div class="chat-group chat-group--${role}">
-        ${!isUser ? html`<div class="chat-group__avatar">🤖</div>` : nothing}
+        ${!isUser ? html`<div class="chat-group__avatar">${isTool ? "🧰" : "🤖"}</div>` : nothing}
         <div class="chat-group__messages">
-          ${group.map((msg) => this.renderBubble(msg, isUser))}
+          ${visibleMessages.map((msg) => this.renderBubble(msg, isUser))}
           ${lastMsg.timestamp ? html`
             <div class="chat-group__meta">
               <span class="chat-group__time">${formatTime(lastMsg.timestamp)}</span>
@@ -207,25 +306,34 @@ export class ChatView extends LitElement {
   }
 
   private renderBubble(msg: ChatMessage, isUser: boolean) {
-    const toolCalls = msg.content?.filter((c) => c.type === "tool_use" || c.tool_name) ?? [];
+    const text = this.getMessageText(msg);
+    const toolBlocks = this.getMessageToolBlocks(msg).map((block) => block as Record<string, unknown>);
+    const isTool = this.isToolRole(msg.role);
+
+    if (!text && toolBlocks.length === 0) {
+      return nothing;
+    }
+
+    if (isTool) {
+      return html`
+        <div class="chat-bubble chat-bubble--tool">
+          ${toolBlocks.map((block) => this.renderToolCard(block, true))}
+        </div>
+      `;
+    }
 
     return html`
       <div class="chat-bubble ${isUser ? "chat-bubble--user" : "chat-bubble--assistant"}">
         ${isUser
-          ? html`<div class="chat-bubble__text">${msg.text}</div>`
-          : html`<div class="chat-bubble__text chat-bubble__markdown"
-              .innerHTML=${renderMarkdown(msg.text)}></div>`
+          ? html`<div class="chat-bubble__text">${text}</div>`
+          : text
+            ? html`<div class="chat-bubble__text chat-bubble__markdown"
+                .innerHTML=${renderMarkdown(text)}></div>`
+            : nothing
         }
-        ${toolCalls.length > 0 ? html`
+        ${toolBlocks.length > 0 ? html`
           <div class="chat-bubble__tools">
-            ${toolCalls.map((tc) => html`
-              <div class="tool-card">
-                <div class="tool-card__name">🔧 ${tc.tool_name ?? "tool"}</div>
-                ${tc.tool_input ? html`
-                  <pre class="tool-card__input">${JSON.stringify(tc.tool_input, null, 2)}</pre>
-                ` : nothing}
-              </div>
-            `)}
+            ${toolBlocks.map((block) => this.renderToolCard(block, false))}
           </div>
         ` : nothing}
       </div>

@@ -134,11 +134,13 @@ export class OpenClawApp extends LitElement {
     this.chatLoading = true;
     try {
       const result = await this.client.loadChatHistory() as { messages?: ChatMessage[] };
-      this.chatMessages = (result?.messages ?? []).map((m: ChatMessage) => ({
-        ...m,
-        id: (m as { id?: string }).id ?? uuid(),
-        text: this.extractMessageText(m),
-      }));
+      this.chatMessages = (result?.messages ?? [])
+        .map((m: ChatMessage) => ({
+          ...m,
+          id: (m as { id?: string }).id ?? uuid(),
+          text: this.extractMessageText(m),
+        }))
+        .filter((m: ChatMessage) => this.hasRenderableMessage(m));
     } catch (err) {
       console.error("Failed to load history:", err);
     } finally {
@@ -183,7 +185,9 @@ export class OpenClawApp extends LitElement {
         usage: (payload.message as ChatMessage)?.usage,
         cost: (payload.message as ChatMessage)?.cost,
       };
-      this.chatMessages = [...this.chatMessages, msg];
+      if (this.hasRenderableMessage(msg)) {
+        this.chatMessages = [...this.chatMessages, msg];
+      }
       this.chatStream = "";
       this.chatStreamRunId = "";
       this.chatRunning = false;
@@ -199,7 +203,7 @@ export class OpenClawApp extends LitElement {
       this.chatStream = "";
       this.chatRunning = false;
     } else if (payload.state === "aborted") {
-      if (this.chatStream) {
+      if (this.chatStream.trim()) {
         const msg: ChatMessage = {
           id: uuid(),
           role: "assistant",
@@ -296,6 +300,29 @@ export class OpenClawApp extends LitElement {
         .join("");
     }
     return "";
+  }
+
+  private isToolRole(role: string) {
+    const normalized = role.toLowerCase();
+    return normalized === "tool" || normalized === "toolresult" || normalized === "tool_result";
+  }
+
+  private hasRenderableMessage(m: ChatMessage): boolean {
+    const text = this.extractMessageText(m).trim();
+    if (text) return true;
+
+    if (Array.isArray(m.content)) {
+      const hasToolContent = m.content.some((c) => {
+        const block = c as Record<string, unknown>;
+        const type = String(block.type ?? "").toLowerCase();
+        return type.includes("tool") || type === "result" || type === "input" || Boolean(block.tool_name) || Boolean(block.toolInput);
+      });
+      if (hasToolContent) return true;
+    }
+
+    const raw = m as unknown as Record<string, unknown>;
+    const hasUsefulToolPayload = Boolean(raw.toolName ?? raw.tool_name ?? raw.name ?? raw.details ?? raw.text ?? raw.tool_input ?? raw.input ?? (Array.isArray(raw.content) && raw.content.length > 0));
+    return this.isToolRole(String(raw.role ?? m.role ?? "")) && hasUsefulToolPayload;
   }
 
   private extractEventText(payload: ChatEventPayload): string {

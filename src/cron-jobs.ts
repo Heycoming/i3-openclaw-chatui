@@ -2340,16 +2340,7 @@ export class CronJobsView extends LitElement {
                         >
                           Run Now
                         </button>
-                        <button
-                          class="btn btn--ghost btn--xs"
-                          @click=${() => {
-                            const payload = this.isRecord(job.payload) ? job.payload : null;
-                            const text = payload ? (typeof payload.text === "string" ? payload.text : typeof payload.message === "string" ? payload.message : "") : "";
-                            void this.wake(id, text);
-                          }}
-                        >
-                          Wake
-                        </button>
+
                       </div>
                     </header>
                     <details class="mc-details" style="margin-top: 8px;">
